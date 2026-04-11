@@ -22,13 +22,14 @@ from bamegfx import BameGFX
 # ---------------------------------------------------------------------------
 # Sample data
 # ---------------------------------------------------------------------------
-VOLTAGE     = 13.2   # V
-CURRENT     = 5.4    # A (positive = discharging)
-POWER       = VOLTAGE * CURRENT
-SOC_PERCENT = 72     # %
-COULOMBS    = SOC_PERCENT * 80 * 3600 / 100  # approximate coulombs remaining
-HOURS_LEFT  = (COULOMBS / 3600.0) / CURRENT
-CAL_AH      = 2.3   # Ah accumulated in current calibration segment
+BATTERY_CAP_NOM = 80    # Ah nominal capacity
+VOLTAGE         = 13.2  # V
+CURRENT         = 5.4   # A (positive = discharging)
+POWER           = VOLTAGE * CURRENT
+SOC_PERCENT     = 72    # %
+COULOMBS        = SOC_PERCENT * BATTERY_CAP_NOM * 3600 / 100  # approximate coulombs remaining
+HOURS_LEFT      = (COULOMBS / 3600.0) / CURRENT
+CAL_AH          = 2.3   # Ah accumulated in current calibration segment
 
 
 def render(display):

@@ -37,8 +37,8 @@ from oled_svg import (
 )
 
 # Adafruit GFX built-in font: 6×8 per char, text size 2 → 12×16
-_CHAR_W = 12  # 6 * 2
-_CHAR_H = 16  # 8 * 2
+_CHAR_W_SIZE2 = 12  # FONT_W(6) * text_size(2)
+_CHAR_H_SIZE2 = 16  # FONT_H(8) * text_size(2)
 
 
 class BameGFX:
@@ -77,7 +77,7 @@ class BameGFX:
         """
         percent = max(0, min(100, int(percent)))
         text = f"{percent}%"
-        total_w = len(text) * _CHAR_W
+        total_w = len(text) * _CHAR_W_SIZE2
         x = zone_x + (zone_w - total_w) // 2
 
         self._disp.setTextSize(2)
@@ -115,7 +115,7 @@ class BameGFX:
 
         # Overlay text in XOR/INVERSE mode
         if label is not None:
-            w = len(str(label)) * _CHAR_W
+            w = len(str(label)) * _CHAR_W_SIZE2
             x = (SCREEN_W - w) // 2
             self._disp.setTextSize(2)
             self._disp.setTextColor(SSD1306_INVERSE, SSD1306_INVERSE)
