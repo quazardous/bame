@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.0"
+#define BAME_VERSION "1.3"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -19,76 +19,75 @@
 #define SCREEN_HEIGHT 64
 #define OLED_ADDR 0x3C
 
-// Zones ecran bicolor definies dans BameGFX.h
+// Bicolor screen zones defined in BameGFX.h
 #define INA226_ADDR 0x40
 
-// Keypad Foxeer Key23 sur pin analogique
+// Foxeer Key23 keypad on analog pin
 #define KEY_PIN A3
-// Bouton action (NO, pull to GND)
+// Action button (NO, pull to GND)
 #define ACTION_BTN_PIN 2
 
-// Batterie LiFePO4 4S 80Ah
+// LiFePO4 4S 80Ah battery
 #define BATTERY_CAPACITY_AH 80.0
 #define SHUNT_RESISTANCE 0.0025
 #define MAX_CURRENT 30.0
 
-// Seuils tension LFP 4S (valeurs usine, ecrasees par EEPROM)
+// LFP 4S voltage thresholds (factory defaults, overridden by EEPROM)
 #define VBAT_FULL_DEFAULT   14.6  // 4 x 3.65V
 #define VBAT_EMPTY_DEFAULT  10.0  // 4 x 2.50V
 
-// Seuils de detection
-#define VBAT_REST_CURRENT  0.3    // courant max pour considerer "repos"
-#define VBAT_CONVERGE_FAST 0.01   // convergence rapide (premiere calibration)
-#define VBAT_CONVERGE_SLOW 0.001  // convergence lente (ajustement continu)
+// Detection thresholds
+#define VBAT_REST_CURRENT  0.3    // max current to consider at rest
+#define VBAT_CONVERGE_FAST 0.01   // fast convergence (first calibration)
+#define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
 
-// EEPROM layout pour voltage calibration (apres keypad: addr 11+)
+// EEPROM layout for voltage calibration (after keypad: addr 11+)
 #define EEPROM_VCAL_MAGIC_ADDR 12
-#define EEPROM_VCAL_ADDR       13  // 2 x float = 8 octets (13-20)
+#define EEPROM_VCAL_ADDR       13  // 2 x float = 8 bytes (13-20)
 #define EEPROM_VCAL_MAGIC_VAL  0xBB
 
-// EEPROM layout pour capacite apprise (apres vcal: addr 21+)
+// EEPROM layout for learned capacity (after vcal: addr 21+)
 #define EEPROM_CAP_MAGIC_ADDR 21
-#define EEPROM_CAP_ADDR       22  // 1 x float = 4 octets (22-25)
+#define EEPROM_CAP_ADDR       22  // 1 x float = 4 bytes (22-25)
 #define EEPROM_CAP_MAGIC_VAL  0xCC
 
-// EEPROM layout pour capacite nominale (addr 26+)
+// EEPROM layout for nominal capacity (addr 26+)
 #define EEPROM_NOM_MAGIC_ADDR 26
-#define EEPROM_NOM_ADDR       27  // 1 x float = 4 octets (27-30)
+#define EEPROM_NOM_ADDR       27  // 1 x float = 4 bytes (27-30)
 #define EEPROM_NOM_MAGIC_VAL  0xDD
 
-// addr 31-35 : libre
+// addr 31-35 : free
 
-// EEPROM layout pour auto deep sleep
-#define EEPROM_ASLEEP_ADDR        36  // 1 octet : 0x01 = actif
+// EEPROM layout for auto deep sleep
+#define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
 
-// Tensions dynamiques
+// Dynamic voltages
 float vbatMax = VBAT_FULL_DEFAULT;
 float vbatMin = VBAT_EMPTY_DEFAULT;
 float lastRestVoltage = 0;
 
-// Capacite batterie
-float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominale (user)
-float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimee (calibration ou fallback nom)
+// Battery capacity
+float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominal (user)
+float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimated (calibration or nominal fallback)
 float batteryCapacityAs = BATTERY_CAPACITY_AH * 3600.0;
-bool capacityKnown = false;   // true si calibration fiable
+bool capacityKnown = false;   // true if reliable calibration
 
-// Calibration capacite par doublement exponentiel
-float calCoulombs = 0;          // coulombs accumules segment en cours
-float calTarget = 0;            // objectif coulombs (0 = mode temps initial)
-float calStartVoltage = 0;      // tension repos debut segment
-unsigned long calStartMs = 0;   // timestamp debut segment
-#define CAL_INITIAL_TIME_MS  60000   // 1 min pour premier palier
-#define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (precision INA226)
+// Capacity calibration by exponential doubling
+float calCoulombs = 0;          // accumulated coulombs for current segment
+float calTarget = 0;            // coulomb target (0 = initial time mode)
+float calStartVoltage = 0;      // rest voltage at segment start
+unsigned long calStartMs = 0;   // segment start timestamp
+#define CAL_INITIAL_TIME_MS  60000   // 1 min for first step
+#define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
 
-bool autoDeepSleep = false;   // deep sleep auto apres timeout inactivite
+bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
 
-// --- Objets ---
+// --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 BameGFX gfx(display);
 INA226 ina(INA226_ADDR, &Wire);
 
-// --- Variables globales ---
-bool demoMode = false;
+// --- Global variables ---
 float voltage = 0;
 float current = 0;
 float power = 0;
@@ -101,7 +100,7 @@ unsigned long lastDisplay = 0;
 #define DISPLAY_INTERVAL_MS 500
 
 // ===========================================
-// Boutons - Foxeer Key23
+// Buttons - Foxeer Key23
 // ===========================================
 enum Button { BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_CENTER };
 
@@ -113,14 +112,15 @@ float socFromVoltage(float v);
 void settingsMenu();
 void batteryMenu();
 
-// Veille
-#define DEEPSLEEP_PRESS_MS 3000 // appui long -> veille profonde
-#define AUTO_SLEEP_MS    60000   // 60s sans interaction -> veille ecran
-#define AUTO_DEEPSLEEP_MS 300000 // 5min sans interaction -> deep sleep
+// Sleep
+#define MENU_PRESS_MS      500  // long press -> system menu
+#define DEEPSLEEP_PRESS_MS 3000 // longer press -> deep sleep
+#define AUTO_SLEEP_MS    60000   // 60s no interaction -> screen sleep
+#define AUTO_DEEPSLEEP_MS 300000 // 5min no interaction -> deep sleep
 bool oledSleeping = false;
 unsigned long lastInteraction = 0;
 
-// ISR pour reveil deep sleep (INT0 sur D2)
+// ISR for deep sleep wake-up (INT0 on D2)
 volatile bool wakeUpFlag = false;
 void wakeUpISR() {
   wakeUpFlag = true;
@@ -142,7 +142,7 @@ void exitOledSleep() {
   #endif
 }
 
-// ISR watchdog pour reveil periodique
+// Watchdog ISR for periodic wake-up
 volatile bool wdtWakeUp = false;
 ISR(WDT_vect) {
   wdtWakeUp = true;
@@ -155,10 +155,10 @@ void enterDeepSleep() {
   #endif
   display.ssd1306_command(SSD1306_DISPLAYOFF);
 
-  // Reveil par bouton D2
+  // Wake-up via D2 button
   attachInterrupt(digitalPinToInterrupt(ACTION_BTN_PIN), wakeUpISR, LOW);
 
-  // Configurer watchdog 8s pour reveil periodique (mesure tension)
+  // Configure 8s watchdog for periodic wake-up (voltage measurement)
   cli();
   wdt_reset();
   MCUSR &= ~(1 << WDRF);
@@ -166,11 +166,11 @@ void enterDeepSleep() {
   WDTCSR = (1 << WDIE) | (1 << WDP3) | (1 << WDP0); // 8s, interrupt mode
   sei();
 
-  // Intervalle adaptatif : 5min (38 cycles) a 1h (450 cycles)
-  // Plus la tension baisse vite, plus on mesure souvent
+  // Adaptive interval: 5min (38 cycles) to 1h (450 cycles)
+  // Faster voltage drop = more frequent measurements
   #define WDT_CYCLES_MIN  38   // 5 min
   #define WDT_CYCLES_MAX  450  // 1 heure
-  uint16_t wdtTarget = WDT_CYCLES_MAX; // commence lent
+  uint16_t wdtTarget = WDT_CYCLES_MAX; // start slow
   uint16_t wdtCount = 0;
   float prevVoltage = voltage;
 
@@ -186,7 +186,7 @@ void enterDeepSleep() {
       if (wdtCount >= wdtTarget) {
         wdtCount = 0;
 
-        // Mesurer
+        // Measure
         Wire.begin();
         if (ina.begin()) {
           ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
@@ -194,12 +194,12 @@ void enterDeepSleep() {
           current = ina.getCurrent();
           updateVoltageCalibration();
 
-          // Adapter l'intervalle selon la variation de tension
+          // Adapt interval based on voltage variation
           float deltaV = abs(voltage - prevVoltage);
           prevVoltage = voltage;
 
           if (deltaV > 0.5) {
-            wdtTarget = WDT_CYCLES_MIN;        // chute rapide -> 5min
+            wdtTarget = WDT_CYCLES_MIN;        // fast drop -> 5min
           } else if (deltaV > 0.1) {
             wdtTarget = WDT_CYCLES_MIN * 3;    // ~15min
           } else if (deltaV > 0.02) {
@@ -212,8 +212,8 @@ void enterDeepSleep() {
     }
   }
 
-  // --- Reveil par bouton ---
-  // Desactiver watchdog
+  // --- Wake-up by button ---
+  // Disable watchdog
   wdt_disable();
   detachInterrupt(digitalPinToInterrupt(ACTION_BTN_PIN));
 
@@ -221,7 +221,7 @@ void enterDeepSleep() {
   oledSleeping = false;
   wakeUpFlag = false;
 
-  // Recaler SOC depuis tension au reveil
+  // Re-sync SOC from voltage on wake-up
   socPercent = socFromVoltage(voltage);
   coulombCount = (socPercent / 100.0) * batteryCapacityAs;
 
@@ -231,16 +231,16 @@ void enterDeepSleep() {
   waitButtonRelease();
 }
 
-// EEPROM layout pour la calibration keypad
-#define EEPROM_MAGIC_ADDR 0        // 1 octet : 0xCA = calibre
-#define EEPROM_CAL_ADDR   1        // 5 x 2 octets (int) = 10 octets
+// EEPROM layout for keypad calibration
+#define EEPROM_MAGIC_ADDR 0        // 1 byte: 0xCA = calibrated
+#define EEPROM_CAL_ADDR   1        // 5 x 2 bytes (int) = 10 bytes
 #define EEPROM_MAGIC_VAL  0xCA
 #define CAL_BTN_COUNT 5
 
-// Ordre : CENTER, UP, DOWN, LEFT, RIGHT (tries: 1, 416, 616, 748, 838)
-// Ecarts: 1-416=415, 416-616=200, 616-748=132, 748-838=90, 838-1023=185
-// Tolerance = min(ecart gauche, ecart droite) / 2
-int keyCalVals[CAL_BTN_COUNT] = {838, 616, 1, 748, 416}; // defauts avec 10k pullup
+// Order: CENTER, UP, DOWN, LEFT, RIGHT (sorted: 1, 416, 616, 748, 838)
+// Gaps: 1-416=415, 416-616=200, 616-748=132, 748-838=90, 838-1023=185
+// Tolerance = min(left gap, right gap) / 2
+int keyCalVals[CAL_BTN_COUNT] = {838, 616, 1, 748, 416}; // defaults with 10k pullup
 
 bool keyCalibrated = false;
 
@@ -259,7 +259,7 @@ bool loadCalFromEEPROM() {
   return true;
 }
 
-// --- Calibration voltage EEPROM ---
+// --- Voltage calibration EEPROM ---
 void saveVcalToEEPROM() {
   EEPROM.write(EEPROM_VCAL_MAGIC_ADDR, EEPROM_VCAL_MAGIC_VAL);
   EEPROM.put(EEPROM_VCAL_ADDR, vbatMax);
@@ -277,7 +277,7 @@ bool loadVcalFromEEPROM() {
   return true;
 }
 
-// --- EEPROM helpers pour float ---
+// --- EEPROM helpers for float ---
 void saveFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float val) {
   EEPROM.write(magicAddr, magicVal);
   EEPROM.put(dataAddr, val);
@@ -289,7 +289,7 @@ bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, floa
   return true;
 }
 
-// Capacite estimee (calibration)
+// Estimated capacity (calibration)
 #define saveCapToEEPROM() saveFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)
 bool loadCapFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
@@ -299,7 +299,7 @@ bool loadCapFromEEPROM() {
   return true;
 }
 
-// Capacite nominale (user)
+// Nominal capacity (user)
 #define saveNomToEEPROM() saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)
 bool loadNomFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)) return false;
@@ -310,7 +310,7 @@ bool loadNomFromEEPROM() {
 void resetCapEEPROM() {
   EEPROM.write(EEPROM_CAP_MAGIC_ADDR, 0xFF);
   capacityKnown = false;
-  batteryCapacityAh = batteryCapacityNom;  // fallback sur nominal
+  batteryCapacityAh = batteryCapacityNom;  // fallback to nominal
   batteryCapacityAs = batteryCapacityNom * 3600.0;
   calCoulombs = 0;
   calTarget = 0;
@@ -321,56 +321,56 @@ void resetCapEEPROM() {
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
 void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
 
-// Mise a jour autocal tension
-// Conditions : repos (|courant| < seuil) ET pas en charge (courant >= 0)
+// Voltage auto-calibration update
+// Conditions: at rest (|current| < threshold) AND not charging (current >= 0)
 unsigned long lastVcalSave = 0;
-#define VCAL_SAVE_INTERVAL 60000  // sauver EEPROM max toutes les 60s
+#define VCAL_SAVE_INTERVAL 60000  // save to EEPROM at most every 60s
 
 void updateVoltageCalibration() {
-  // Ignorer si en charge (tension artificiellement haute)
+  // Ignore if charging (artificially high voltage)
   if (current < -VBAT_REST_CURRENT) return;
-  // Ignorer si pas au repos
+  // Ignore if not at rest
   if (abs(current) > VBAT_REST_CURRENT) return;
 
   lastRestVoltage = voltage;
 
-  // Vitesse de convergence : rapide si loin, lente si proche
+  // Convergence speed: fast if far, slow if close
   float conv;
 
-  // Mise a jour Vmax
+  // Update Vmax
   if (voltage > vbatMax * 0.98) {
     conv = (voltage > vbatMax) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
     vbatMax = vbatMax * (1.0 - conv) + voltage * conv;
   }
 
-  // Mise a jour Vmin
+  // Update Vmin
   if (voltage < vbatMin * 1.05) {
     conv = (voltage < vbatMin) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
     vbatMin = vbatMin * (1.0 - conv) + voltage * conv;
   }
 
-  // Sauvegarder periodiquement en EEPROM (pas a chaque mesure)
+  // Periodically save to EEPROM (not every measurement)
   if (millis() - lastVcalSave >= VCAL_SAVE_INTERVAL) {
     saveVcalToEEPROM();
     lastVcalSave = millis();
   }
 }
 
-// Seuils calcules dynamiquement a partir des valeurs calibrees
-// Chaque bouton a sa propre tolerance = distance au voisin le plus proche / 2
+// Thresholds computed dynamically from calibrated values
+// Each button has its own tolerance = distance to nearest neighbor / 2
 int keyThresholds[CAL_BTN_COUNT];
 
 void computeThresholds() {
-  // Trier les valeurs pour trouver les distances
+  // Sort values to find distances
   int sorted[CAL_BTN_COUNT + 1]; // +1 pour NONE (1023)
   int sortIdx[CAL_BTN_COUNT];
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
     sorted[i] = keyCalVals[i];
     sortIdx[i] = i;
   }
-  sorted[CAL_BTN_COUNT] = 1023; // valeur repos
+  sorted[CAL_BTN_COUNT] = 1023; // idle value
 
-  // Tri simple des valeurs
+  // Simple sort of values
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
     for (int j = i + 1; j < CAL_BTN_COUNT; j++) {
       if (sorted[j] < sorted[i]) {
@@ -380,7 +380,7 @@ void computeThresholds() {
     }
   }
 
-  // Calculer le seuil pour chaque bouton
+  // Compute threshold for each button
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
     int distLeft = (i == 0) ? sorted[i] : sorted[i] - sorted[i - 1];
     int distRight = sorted[i + 1] - sorted[i];
@@ -391,10 +391,10 @@ void computeThresholds() {
 }
 
 Button readButton() {
-  // Bouton action physique = CENTER
+  // Physical action button = CENTER
   if (digitalRead(ACTION_BTN_PIN) == LOW) return BTN_CENTER;
 
-  // Pad Foxeer
+  // Foxeer pad
   int val = analogRead(KEY_PIN);
   if (abs(val - keyCalVals[0]) < keyThresholds[0]) return BTN_CENTER;
   if (abs(val - keyCalVals[1]) < keyThresholds[1]) return BTN_UP;
@@ -404,7 +404,7 @@ Button readButton() {
   return BTN_NONE;
 }
 
-// Anti-rebond : retourne le bouton si stable pendant 50ms
+// Debounce: returns button if stable for 50ms
 Button readButtonDebounced() {
   Button b = readButton();
   if (b == BTN_NONE) return BTN_NONE;
@@ -413,25 +413,24 @@ Button readButtonDebounced() {
   return (b == b2) ? b : BTN_NONE;
 }
 
-// Attend que le bouton soit relache
+// Wait for button release
 void waitButtonRelease() {
   while (readButton() != BTN_NONE) delay(10);
 }
 
-// Appui long -> deep sleep, utilisable depuis n'importe quel ecran
-// Appeler quand BTN_CENTER est detecte. Retourne true si deep sleep declenche.
-bool checkLongPress() {
+// Long press: 2 tiers — SYSTEM menu (1.5s) or deep sleep (3s)
+void checkLongPress() {
   unsigned long pressStart = millis();
-
-  // Deep sleep toujours disponible (calibration s'arrete en deep sleep)
+  bool menuTriggered = false;
 
   while (readButton() == BTN_CENTER) {
     unsigned long held = millis() - pressStart;
 
-    if (held > 500) {
-      float pct = (float)held * 100.0f / DEEPSLEEP_PRESS_MS;
-      if (pct > 100.0f) pct = 100.0f;
+    if (held >= MENU_PRESS_MS) {
+      // Tier 2 gauge: filling toward deep sleep
       display.clearDisplay();
+      float pct = (float)(held - MENU_PRESS_MS) * 100.0f / (DEEPSLEEP_PRESS_MS - MENU_PRESS_MS);
+      if (pct > 100.0f) pct = 100.0f;
       gfx.drawGauge(pct, F("SLEEP"));
       display.display();
     }
@@ -441,12 +440,19 @@ bool checkLongPress() {
       enterDeepSleep();
       lastMeasure = millis();
       lastInteraction = millis();
-      return true;
+      return;
     }
 
     delay(50);
   }
-  return false;
+
+  // Released — check which tier was reached
+  unsigned long held = millis() - pressStart;
+  if (held >= MENU_PRESS_MS) {
+    waitButtonRelease();
+    settingsMenu();
+    lastInteraction = millis();
+  }
 }
 
 // ===========================================
@@ -465,9 +471,9 @@ const SocPoint socCurve[] = {
 const int socCurveSize = sizeof(socCurve) / sizeof(socCurve[0]);
 
 float socFromVoltage(float v) {
-  // Rescale la tension selon les bornes dynamiques
-  // La courbe est definie pour VBAT_EMPTY_DEFAULT..VBAT_FULL_DEFAULT
-  // On mappe v dans cet espace selon vbatMin..vbatMax
+  // Rescale voltage to dynamic bounds
+  // Curve is defined for VBAT_EMPTY_DEFAULT..VBAT_FULL_DEFAULT
+  // Map v into that range using vbatMin..vbatMax
   float vScaled = VBAT_EMPTY_DEFAULT +
     (v - vbatMin) / (vbatMax - vbatMin) *
     (VBAT_FULL_DEFAULT - VBAT_EMPTY_DEFAULT);
@@ -487,196 +493,70 @@ float socFromVoltage(float v) {
 // Diagnostics
 // ===========================================
 
-// --- Diag 1 : Calibration keypad ---
-void diagKeypad() {
-  #if BAME_DEBUG
-  Serial.println(F("[DIAG] Calibration keypad"));
-  Serial.println(F("Appuie sur chaque bouton, note les valeurs ADC"));
-  Serial.println(F("Centre pour quitter"));
-  #endif
-
-  #if BAME_DEBUG
-  int lastVal = -1;
-  #endif
-  bool quit = false;
-
-  while (!quit) {
-    int val = analogRead(KEY_PIN);
-
-    // Affichage OLED
-    display.clearDisplay();
-    // Zone jaune : titre
-    display.setTextSize(1);
-    display.setCursor(0, 4);
-    display.print(F("DIAG: Keypad cal"));
-
-    // Zone bleue : contenu
-    display.setTextSize(2);
-    display.setCursor(0, BLUE_Y + 2);
-    display.print(F("ADC:"));
-    display.println(val);
-
-    display.setTextSize(1);
-    display.setCursor(0, BLUE_Y + 22);
-    Button b = readButton();
-    display.print(F("Button: "));
-    switch (b) {
-      case BTN_UP:     display.print(F("UP"));      break;
-      case BTN_DOWN:   display.print(F("DOWN"));    break;
-      case BTN_LEFT:   display.print(F("LEFT"));    break;
-      case BTN_RIGHT:  display.print(F("RIGHT"));   break;
-      case BTN_CENTER: display.print(F("CENTER"));  break;
-      default:         display.print(F("-"));        break;
-    }
-
-    display.display();
-
-    // Serie : afficher seulement quand la valeur change significativement
-    #if BAME_DEBUG
-    if (abs(val - lastVal) > 5) {
-      Serial.print(F("ADC: "));
-      Serial.println(val);
-      lastVal = val;
-    }
-    #endif
-
-    // Quitter avec gauche maintenu 1s
-    if (b == BTN_LEFT) {
-      delay(500);
-      if (readButton() == BTN_LEFT) quit = true;
-    }
-
-    delay(100);
-  }
-  waitButtonRelease();
-}
-
-// --- Diag 2 : Scan I2C ---
-void diagI2CScan() {
-  display.clearDisplay();
-  gfx.drawTitle(F("I2C SCAN"));
-  display.setTextSize(1);
-  display.setCursor(0, BLUE_Y + 2);
-  int found = 0;
-  for (byte addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      display.print(F("0x"));
-      if (addr < 16) display.print(F("0"));
-      display.print(addr, HEX);
-      display.print(F(" "));
-      found++;
-    }
-  }
-  display.setCursor(0, BLUE_Y + 22);
-  display.print(found);
-  display.print(F(" device(s)"));
-  display.display();
-
-  while (true) {
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT) break;
-    if (b == BTN_CENTER && checkLongPress()) return;
-    delay(50);
-  }
-  waitButtonRelease();
-}
-
-// --- Diag 4 : Test INA226 ---
-void diagINA226() {
-  bool ok = ina.begin();
-  if (!ok) {
-    display.clearDisplay();
-    gfx.drawTitle(F("INA226"));
-    gfx.drawText(1, F("NOT FOUND"), 2);
-    display.display();
-    delay(2000);
-    return;
-  }
-
-  ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
-  ina.setAverage(4);
-
-  while (true) {
-    float v = ina.getBusVoltage();
-    float a = ina.getCurrent();
-    float w = ina.getPower();
-
-    display.clearDisplay();
-    gfx.drawTitle(F("INA226"));
-    display.setTextSize(1);
-    display.setCursor(0, BLUE_Y + 2);
-    display.print(F("V: ")); display.print(v, 3); display.println(F(" V"));
-    display.print(F("A: ")); display.print(a, 3); display.println(F(" A"));
-    display.print(F("W: ")); display.print(w, 3); display.print(F(" W"));
-    display.display();
-
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT) break;
-    if (b == BTN_CENTER && checkLongPress()) return;
-    delay(200);
-  }
-  waitButtonRelease();
-}
-
-// --- Diag 5 : Infos systeme ---
+// --- Hardware diag (all in one screen) ---
 extern int __heap_start, *__brkval;
 int freeRAM() {
   int v;
   return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
 
-void diagSysInfo() {
-  display.clearDisplay();
-  gfx.drawTitle(F("SYSTEM"));
-  display.setTextSize(1);
-  display.setCursor(0, BLUE_Y + 2);
-  display.print(F("BAME v" BAME_VERSION));
-  display.println();
-  display.print(F("Clock: "));
-  display.print(F_CPU / 1000000UL);
-  display.println(F(" MHz"));
-  display.print(F("RAM: "));
-  display.print(freeRAM());
-  display.println(F(" free"));
-  display.print(F("Uptime: "));
-  display.print(millis() / 1000);
-  display.print(F("s"));
-  display.display();
-
-  while (true) {
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT) break;
-    if (b == BTN_CENTER && checkLongPress()) return;
-    delay(50);
-  }
-  waitButtonRelease();
-}
-
-// --- Diag 3 : Test ecran (tous pixels allumes) ---
-void diagScreen() {
-  display.clearDisplay();
-  display.fillRect(0, 0, SCREEN_W, SCREEN_H, SSD1306_WHITE);
-  display.display();
-
-  while (true) {
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT) break;
-    if (b == BTN_CENTER && checkLongPress()) return;
-    delay(50);
-  }
-  waitButtonRelease();
-}
-
-// --- Batterie : page info (lecture seule) ---
-void batteryInfo() {
+void diagHW(const __FlashStringHelper* title) {
   while (true) {
     display.clearDisplay();
-    gfx.drawTitle(F("BAT INFO"));
+    gfx.drawTitle(title);
+    display.setTextSize(1);
+    display.setCursor(0, BLUE_Y);
+
+    // Line 1: Version + RAM
+    display.print(F("v" BAME_VERSION " RAM:"));
+    display.print(freeRAM());
+
+    // Line 2: I2C devices
+    display.setCursor(0, BLUE_Y + 9);
+    display.print(F("I2C:"));
+    for (byte addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        display.print(F(" 0x"));
+        if (addr < 16) display.print('0');
+        display.print(addr, HEX);
+      }
+    }
+
+    // Line 3: INA226 live
+    display.setCursor(0, BLUE_Y + 18);
+    float v = ina.getBusVoltage();
+    float a = ina.getCurrent();
+    display.print(v, 2); display.print(F("V "));
+    display.print(a, 2); display.print(F("A "));
+    display.print(v * abs(a), 1); display.print('W');
+
+    // Line 4: Uptime
+    display.setCursor(0, BLUE_Y + 27);
+    display.print(F("Up:"));
+    unsigned long s = millis() / 1000;
+    if (s >= 3600) { display.print(s / 3600); display.print(F("h")); }
+    if (s >= 60) { display.print((s % 3600) / 60); display.print(F("m")); }
+    display.print(s % 60); display.print('s');
+
+    display.display();
+
+    Button b = readButtonDebounced();
+    if (b == BTN_LEFT) break;
+    delay(200);
+  }
+  waitButtonRelease();
+}
+
+// --- Battery: info page (read only) ---
+void batteryInfo(const __FlashStringHelper* title) {
+  while (true) {
+    display.clearDisplay();
+    gfx.drawTitle(title);
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
 
-    // Ligne 1 : Capacite estimee [nominale]
+    // Line 1: Estimated capacity [nominal]
     display.setCursor(0, BLUE_Y);
     display.print(F("Cap:"));
     if (capacityKnown) {
@@ -688,12 +568,12 @@ void batteryInfo() {
     display.print((int)batteryCapacityNom);
     display.print(F("]"));
 
-    // Ligne 2 : Calibration + delta%
+    // Line 2: Calibration + delta%
     display.setCursor(0, BLUE_Y + 9);
     float calAh = calCoulombs / 3600.0;
-    display.print(calAh, 1);
+    display.print(calAh, calAh < 1.0 ? 3 : 1);
     display.print(F("/"));
-    if (calTarget > 0) display.print(calTarget / 3600.0, 0);
+    if (calTarget > 0) { float tAh = calTarget / 3600.0; display.print(tAh, tAh < 1.0 ? 3 : 0); }
     else display.print('-');
     display.print(F("Ah"));
     if (calStartVoltage > 0 && lastRestVoltage > 0) {
@@ -701,7 +581,7 @@ void batteryInfo() {
       if (ds > 0) { display.print(F(" (")); display.print(ds); display.print(F("%)")); }
     }
 
-    // Ligne 3 : Segment V
+    // Line 3: Segment V
     display.setCursor(0, BLUE_Y + 18);
     if (calStartVoltage > 0) display.print(calStartVoltage, 2);
     else display.print('-');
@@ -710,7 +590,7 @@ void batteryInfo() {
     else display.print('-');
     display.print('V');
 
-    // Ligne 4 : Vmax/Vmin
+    // Line 4: Vmax/Vmin
     display.setCursor(0, BLUE_Y + 27);
     display.print(vbatMax, 2);
     display.print('/');
@@ -726,40 +606,49 @@ void batteryInfo() {
   waitButtonRelease();
 }
 
-// --- Batterie : parametres batterie ---
-void batteryMenu() {
+// --- SYSTEM menu (flat) ---
+#define SYS_COUNT 6
+
+void settingsMenu() {
   uint8_t sel = 0;
-  const uint8_t count = 4;
   int8_t editing = -1;
 
   float tmpCap = batteryCapacityNom;
-  bool tmpReset = false;
+  bool tmpConfirm = false;  // shared for all YES/NO confirmations
   bool tmpSleep = autoDeepSleep;
 
   while (true) {
     display.clearDisplay();
-    gfx.drawTitle(F("BATTERY"));
+    gfx.drawTitle(F("Bame v" BAME_VERSION));
 
     char buf[10];
 
-    // Capacite nominale
+    // 0: Capacity
     int capVal = (int)(editing == 0 ? tmpCap : batteryCapacityNom);
     itoa(capVal, buf, 10);
     strcat(buf, "Ah");
     gfx.drawMenuItem(0, ' ', F("Capacity"), buf, sel == 0, editing == 0);
 
-    // Reset cal
-    gfx.drawMenuItem(1, ' ', F("Reset cal"),
-      editing == 1 ? (tmpReset ? "YES" : "NO") : "",
+    // 1: Sleep
+    gfx.drawMenuItem(1, ' ', F("Eco mode"),
+      (editing == 1 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
       sel == 1, editing == 1);
 
-    // Auto sleep
-    gfx.drawMenuItem(2, ' ', F("Sleep"),
-      (editing == 2 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
-      sel == 2, editing == 2);
+    // 2: Info cal
+    gfx.drawMenuItem(2, '>', F("Info cal"), NULL, sel == 2);
 
-    // Info
-    gfx.drawMenuItem(3, '>', F("Info"), NULL, sel == 3);
+    // 3: Reset cal
+    gfx.drawMenuItem(3, ' ', F("Reset cal"),
+      editing == 3 ? (tmpConfirm ? "YES" : "NO") : "",
+      sel == 3, editing == 3);
+
+    // 4: Hardware
+    gfx.drawMenuItem(4, '>', F("Hardware"), NULL, sel == 4);
+
+    // 5: Reset ALL
+    gfx.drawMenuItem(5, ' ', F("Reset ALL"),
+      editing == 5 ? (tmpConfirm ? "YES" : "NO") : "",
+      sel == 5, editing == 5);
 
     display.display();
 
@@ -770,34 +659,40 @@ void batteryMenu() {
       switch (b) {
         case BTN_UP:
           if (editing == 0) { tmpCap += 1; if (tmpCap > 500) tmpCap = 500; }
-          else if (editing == 1) { tmpReset = !tmpReset; }
-          else if (editing == 2) { tmpSleep = !tmpSleep; }
+          else if (editing == 1) { tmpSleep = !tmpSleep; }
+          else if (editing == 3 || editing == 5) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
           if (editing == 0) { tmpCap -= 1; if (tmpCap < 1) tmpCap = 1; }
-          else if (editing == 1) { tmpReset = !tmpReset; }
-          else if (editing == 2) { tmpSleep = !tmpSleep; }
+          else if (editing == 1) { tmpSleep = !tmpSleep; }
+          else if (editing == 3 || editing == 5) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_CENTER:
           if (editing == 0) {
             batteryCapacityNom = tmpCap;
             saveNomToEEPROM();
-            // Si pas de calibration, fallback sur nominal
             if (!capacityKnown) {
               batteryCapacityAh = batteryCapacityNom;
               batteryCapacityAs = batteryCapacityNom * 3600.0;
             }
           } else if (editing == 1) {
-            if (tmpReset) { resetCapEEPROM(); tmpReset = false; }
-          } else if (editing == 2) {
             autoDeepSleep = tmpSleep;
             saveAutoSleepToEEPROM();
+          } else if (editing == 3) {
+            if (tmpConfirm) resetCapEEPROM();
+          } else if (editing == 5) {
+            if (tmpConfirm) {
+              for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
+              // Software reboot via watchdog
+              wdt_enable(WDTO_15MS);
+              while (true);
+            }
           }
           editing = -1;
           break;
         case BTN_LEFT:
           tmpCap = batteryCapacityNom;
-          tmpReset = false;
+          tmpConfirm = false;
           tmpSleep = autoDeepSleep;
           editing = -1;
           break;
@@ -805,124 +700,16 @@ void batteryMenu() {
       }
     } else {
       switch (b) {
-        case BTN_UP: sel = (sel == 0) ? count - 1 : sel - 1; break;
-        case BTN_DOWN: sel = (sel + 1) % count; break;
+        case BTN_UP: sel = (sel == 0) ? SYS_COUNT - 1 : sel - 1; break;
+        case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
         case BTN_CENTER:
-          if (sel == 3) {
-            waitButtonRelease();
-            batteryInfo();
-          } else {
+          if (sel == 2) { waitButtonRelease(); batteryInfo(F("Info cal")); }
+          else if (sel == 4) { waitButtonRelease(); diagHW(F("Hardware")); }
+          else {
             editing = sel;
             tmpCap = batteryCapacityNom;
-            tmpReset = false;
+            tmpConfirm = false;
             tmpSleep = autoDeepSleep;
-          }
-          break;
-        case BTN_LEFT:
-          waitButtonRelease();
-          return;
-        default: break;
-      }
-    }
-    waitButtonRelease();
-  }
-}
-
-// --- Menu principal SYSTEM (flat, pagine) ---
-#define SYS_MENU_COUNT 7
-#define SYS_PAGE_SIZE  5
-
-void settingsMenu() {
-  uint8_t sel = 0;
-  int8_t editing = -1;
-  bool tmpDemo = false;
-
-  while (true) {
-    uint8_t page = sel / SYS_PAGE_SIZE;
-    uint8_t pages = (SYS_MENU_COUNT + SYS_PAGE_SIZE - 1) / SYS_PAGE_SIZE;
-    uint8_t pageStart = page * SYS_PAGE_SIZE;
-    uint8_t pageEnd = pageStart + SYS_PAGE_SIZE;
-    if (pageEnd > SYS_MENU_COUNT) pageEnd = SYS_MENU_COUNT;
-
-    display.clearDisplay();
-
-    // Titre avec pagination
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    if (pages > 1) {
-      char title[12];
-      strcpy(title, "SYSTEM ");
-      title[7] = '1' + page;
-      title[8] = '/';
-      title[9] = '0' + pages;
-      title[10] = 0;
-      int16_t tw = strlen(title) * 6;
-      display.setCursor((SCREEN_WIDTH - tw) / 2, 4);
-      display.print(title);
-    } else {
-      gfx.drawTitle(F("SYSTEM"));
-    }
-
-    // Items visibles sur cette page
-    for (uint8_t i = pageStart; i < pageEnd; i++) {
-      uint8_t row = i - pageStart;
-      bool s = (i == sel);
-      switch (i) {
-        case 0: gfx.drawMenuItem(row, '>', F("Battery"), NULL, s); break;
-        case 1: gfx.drawMenuItem(row, '>', F("Keypad"), NULL, s); break;
-        case 2: gfx.drawMenuItem(row, '>', F("I2C"), NULL, s); break;
-        case 3: gfx.drawMenuItem(row, '>', F("Screen"), NULL, s); break;
-        case 4: gfx.drawMenuItem(row, '>', F("INA226"), NULL, s); break;
-        case 5: gfx.drawMenuItem(row, '>', F("Sys info"), NULL, s); break;
-        case 6: gfx.drawMenuItem(row, ' ', F("Demo"),
-          editing == 6 ? (tmpDemo ? "YES" : "NO") : "",
-          s, editing == 6); break;
-      }
-    }
-
-    display.display();
-
-    Button b = readButtonDebounced();
-    if (b == BTN_NONE) { delay(50); continue; }
-
-    if (editing >= 0) {
-      switch (b) {
-        case BTN_UP:
-        case BTN_DOWN:
-          tmpDemo = !tmpDemo;
-          break;
-        case BTN_CENTER:
-          if (tmpDemo) { demoMode = true; return; }
-          editing = -1;
-          break;
-        case BTN_LEFT:
-          tmpDemo = false;
-          editing = -1;
-          break;
-        default: break;
-      }
-    } else {
-      switch (b) {
-        case BTN_UP:
-          sel = (sel == 0) ? SYS_MENU_COUNT - 1 : sel - 1;
-          break;
-        case BTN_DOWN:
-          sel = (sel + 1) % SYS_MENU_COUNT;
-          break;
-        case BTN_CENTER:
-          waitButtonRelease();
-          if (sel == 6) {
-            editing = 6;
-            tmpDemo = false;
-          } else {
-            switch (sel) {
-              case 0: batteryMenu(); break;
-              case 1: diagKeypad(); break;
-              case 2: diagI2CScan(); break;
-              case 3: diagScreen(); break;
-              case 4: diagINA226(); break;
-              case 5: diagSysInfo(); break;
-            }
           }
           break;
         case BTN_LEFT:
@@ -939,45 +726,12 @@ void settingsMenu() {
 // Mode normal
 // ===========================================
 
-// --- Lectures capteur (simulees en demoMode) ---
-float simSoc = 100.0;
-bool simDirection = false; // false = descend, true = monte
-
-float readVoltage() {
-  if (demoMode) {
-    return 10.0 + (simSoc / 100.0) * 4.6;
-  }
-  return ina.getBusVoltage();
-}
-
-float readCurrent() {
-  if (demoMode) {
-    return simDirection ? -5.0 : 12.5;
-  }
-  return ina.getCurrent();
-}
-
-float readPower() {
-  if (demoMode) {
-    return readVoltage() * abs(readCurrent());
-  }
-  return ina.getPower();
-}
-
-void updateSimSoc() {
-  if (!demoMode) return;
-  if (simDirection) {
-    simSoc += 0.05;
-    if (simSoc >= 100.0) { simSoc = 100.0; simDirection = false; }
-  } else {
-    simSoc -= 0.05;
-    if (simSoc <= 0.0) { simSoc = 0.0; simDirection = true; }
-  }
-}
+// --- Sensor readings ---
+float readVoltage() { return ina.getBusVoltage(); }
+float readCurrent() { return ina.getCurrent(); }
+float readPower() { return ina.getPower(); }
 
 void updateMeasurements() {
-  updateSimSoc();
-
   voltage = readVoltage();
   current = readCurrent();
   power = readPower();
@@ -986,13 +740,7 @@ void updateMeasurements() {
   float dtSeconds = (now - lastMeasure) / 1000.0;
   lastMeasure = now;
 
-  if (demoMode) {
-    socPercent = simSoc;
-    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-    return;
-  }
-
-  // Pas de batterie
+  // No battery
   static bool batteryPresent = false;
   if (voltage < 1.0) {
     batteryPresent = false;
@@ -1001,7 +749,7 @@ void updateMeasurements() {
     return;
   }
 
-  // 1) Init : attendre tension stabilisee avant de verrouiller SOC
+  // 1) Init: wait for stable voltage before locking SOC
   if (!batteryPresent) {
     socPercent = socFromVoltage(voltage);
     coulombCount = (socPercent / 100.0) * batteryCapacityAs;
@@ -1017,50 +765,87 @@ void updateMeasurements() {
   if (coulombCount < 0) coulombCount = 0;
   socPercent = (coulombCount / batteryCapacityAs) * 100.0;
 
-  // 4) Calibration par doublement exponentiel
-  //    Accumule coulombs en decharge, sauvegarde quand objectif atteint ET repos
+  // 3) Exponential doubling calibration
+  //    Accumulate discharge coulombs. A partial recharge invalidates
+  //    the segment because the voltage-SOC mapping becomes unreliable
+  //    after a charge event (surface charge, hysteresis).
   if (current > 0) {
     calCoulombs += current * dtSeconds;
+  } else if (current < -VBAT_REST_CURRENT) {
+    // Charging detected: invalidate current segment
+    calCoulombs = 0;
+    calTarget = 0;
+    calStartVoltage = 0;
   }
 
-  // Verifier si on a atteint l'objectif de calibration
-  bool calObjectifAtteint;
-  if (calTarget <= 0) {
-    // Mode temps initial : 1 min ET minimum coulombs
-    calObjectifAtteint = (now - calStartMs >= CAL_INITIAL_TIME_MS)
-                      && (calCoulombs >= CAL_MIN_COULOMBS);
+  // 4) Rest detection (stable for 5s before trusting voltage)
+  //    LFP cells need a few seconds after load removal for the voltage
+  //    to settle (internal resistance + diffusion). Readings taken
+  //    immediately after load removal can be 20-50mV off.
+  static unsigned long restSince = 0;
+  if (abs(current) < VBAT_REST_CURRENT) {
+    if (restSince == 0) restSince = now;
+    bool stableRest = (now - restSince >= 5000);
+
+    // SOC blend: only after 5s stable rest, gentle correction (5%)
+    //   Without this guard the blend runs every 100ms and converges
+    //   to the voltage estimate in ~3s, making coulomb counting
+    //   pointless at rest. On the flat LFP curve (13.1-13.4V spans
+    //   30-90% SOC), a 10mV error → ~5% SOC jump if blended too fast.
+    if (stableRest) {
+      float socV = socFromVoltage(voltage);
+      socPercent = socPercent * 0.95 + socV * 0.05;
+      coulombCount = (socPercent / 100.0) * batteryCapacityAs;
+      lastRestVoltage = voltage;
+      // Initialize segment start if not set yet
+      if (calStartVoltage == 0) {
+        calStartVoltage = voltage;
+        calStartMs = now;
+      }
+    }
   } else {
-    // Mode doublement : objectif coulombs
-    calObjectifAtteint = (calCoulombs >= calTarget);
+    restSince = 0;
   }
 
-  // Sauvegarder quand objectif atteint ET au repos (tension fiable)
-  if (calObjectifAtteint && abs(current) < VBAT_REST_CURRENT && calCoulombs > 0) {
+  // 5) Calibration save: target reached AND 5s stable rest AND valid segment
+  //    Both start and end voltages must be taken under the same 5s rest
+  //    condition to ensure symmetric accuracy.
+  bool calTargetReached;
+  if (calTarget <= 0) {
+    // Initial time mode: 1 min AND minimum coulombs
+    calTargetReached = (now - calStartMs >= CAL_INITIAL_TIME_MS)
+                    && (calCoulombs >= CAL_MIN_COULOMBS);
+  } else {
+    // Doubling mode: coulomb target
+    calTargetReached = (calCoulombs >= calTarget);
+  }
+
+  if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0
+      && abs(current) < VBAT_REST_CURRENT && restSince > 0
+      && (now - restSince >= 5000)) {
     float vEnd = voltage;
     float socStart = socFromVoltage(calStartVoltage);
     float socEnd = socFromVoltage(vEnd);
     float deltaSoc = socStart - socEnd;
 
-    // Estimer capacite si delta SOC suffisant
-    if (deltaSoc > 5.0 && calStartVoltage > 0) {
+    // Estimate capacity if delta SOC is meaningful
+    if (deltaSoc > 5.0) {
       float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
-      // Sanity check
       if (estAh > 1.0 && estAh < 500.0) {
         if (!capacityKnown) {
-          // Premiere estimation : accepter si delta > 30%
+          // First estimate: accept only if delta > 30% (reliable)
           if (deltaSoc > 30.0) {
             batteryCapacityAh = estAh;
             batteryCapacityAs = estAh * 3600.0;
             capacityKnown = true;
             saveCapToEEPROM();
-            // Calibration fiable → activer deep sleep auto
             if (!autoDeepSleep) {
               autoDeepSleep = true;
               saveAutoSleepToEEPROM();
             }
           }
         } else {
-          // Convergence ponderee par delta SOC
+          // Weighted convergence: larger delta = more weight
           float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
           batteryCapacityAh = batteryCapacityAh * (1.0 - weight) + estAh * weight;
           batteryCapacityAs = batteryCapacityAh * 3600.0;
@@ -1069,26 +854,12 @@ void updateMeasurements() {
       }
     }
 
-    // Doubler l'objectif pour le palier suivant
+    // Double the target for the next step
     calTarget = calCoulombs * 2.0;
-    // Nouveau segment : repos actuel = debut du suivant
+    // New segment starts from current rest voltage
     calStartVoltage = vEnd;
     calStartMs = now;
     calCoulombs = 0;
-  }
-
-  // 5) Au repos : recaler SOC vers tension (correction unique, pas blend continu)
-  if (abs(current) < VBAT_REST_CURRENT) {
-    float socV = socFromVoltage(voltage);
-    socPercent = socPercent * 0.9 + socV * 0.1;
-    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-    // Memoriser tension repos pour calibration
-    lastRestVoltage = voltage;
-    // Initialiser debut segment si pas encore fait
-    if (calStartVoltage == 0) {
-      calStartVoltage = voltage;
-      calStartMs = now;
-    }
   }
 
   updateVoltageCalibration();
@@ -1097,8 +868,8 @@ void updateMeasurements() {
 void updateDisplay() {
   display.clearDisplay();
 
-  // Pas de batterie detectee
-  if (!demoMode && voltage < 1.0) {
+  // No battery detected
+  if (voltage < 1.0) {
     gfx.drawGauge(0);
     display.setTextSize(2);
     display.setCursor(4, BLUE_Y + 12);
@@ -1107,19 +878,19 @@ void updateDisplay() {
     return;
   }
 
-  // === Zone JAUNE (0-15) : Jauge SOC avec sprites XOR ===
+  // === YELLOW ZONE (0-15): SOC gauge with XOR sprites ===
   gfx.drawGauge(socPercent);
 
-  // === Zone BLEUE (16-63) ===
+  // === BLUE ZONE (16-63) ===
 
-  // Ligne 1 : Tension + etat
+  // Line 1: Voltage + state
   display.setTextSize(2);
   display.setCursor(0, BLUE_Y + 2);
   display.print(voltage, 1);
   display.setTextSize(1);
   display.print(F("V"));
 
-  // Capacite restante en Ah, aligne a droite
+  // Remaining Ah, right-aligned
   int ahInt = (int)(coulombCount / 3600.0);
   uint8_t ahDigits = 1;
   if (ahInt >= 10)   ahDigits = 2;
@@ -1131,15 +902,14 @@ void updateDisplay() {
   display.setTextSize(1);
   display.print(F("Ah"));
 
-  // Ligne 2 : Puissance + courant
+  // Line 2: Power + current
   display.setTextSize(1);
   display.setCursor(0, BLUE_Y + 22);
   display.print((int)abs(power));
   display.print(F("W"));
-  // Amperes aligne a droite
+  // Amps right-aligned
   {
-    // Compter les chars de current avec 1 decimale + "A"
-    // signe(0-1) + partie entiere(1-3) + '.' + decimale + 'A'
+    // Count chars for current with 1 decimal + "A"
     int ci = (int)abs(current);
     uint8_t alen = 4; // "X.XA" minimum
     if (ci >= 10) alen++;
@@ -1150,7 +920,7 @@ void updateDisplay() {
     display.print(F("A"));
   }
 
-  // Ligne 3 : Fleche + temps restant
+  // Line 3: Arrow + time remaining
   int16_t ty = BLUE_Y + 37;
   float hoursLeft = 0;
   if (current > 0.5) {
@@ -1167,7 +937,7 @@ void updateDisplay() {
     int h = (int)hoursLeft;
     int m = (int)((hoursLeft - h) * 60);
 
-    // Triangle : < decharge, > charge
+    // Triangle: < discharge, > charge
     if (current > 0) display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
     else             display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
 
@@ -1179,16 +949,28 @@ void updateDisplay() {
     tbuf[5] = 0;
     display.print(tbuf);
 
-    // Bas droite : cumul calibration (decharge) ou icone batterie (charge)
-    if (current > 0 && !autoDeepSleep) {
-      gfx.drawCalSpinner(SCREEN_W - 38, ty + 3);
-      float calAh = calCoulombs / 3600.0;
+    if (current < 0) {
+      gfx.drawChargingBattery(106, ty);
+    }
+  }
+
+  // Bottom right: calibration counter (always visible unless charging or eco mode)
+  if (current > -VBAT_REST_CURRENT && !autoDeepSleep) {
+    bool needsRest = (calStartVoltage == 0)
+      || ((calTarget > 0) ? (calCoulombs >= calTarget)
+      : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
+    bool blink = (millis() / DISPLAY_INTERVAL_MS) % 2;
+    float calAh = calCoulombs / 3600.0;
+    // Ah text: blink if blocked, steady otherwise
+    if (!needsRest || blink) {
       display.setCursor(SCREEN_W - 30, ty);
       if (calAh >= 10.0) display.print((int)calAh);
       else display.print(calAh, 1);
       display.print(F("Ah"));
-    } else if (current < 0) {
-      gfx.drawChargingBattery(106, ty);
+    }
+    // Play triangle: blink only when accumulating and segment valid
+    if (!needsRest && current > 0.5 && blink) {
+      display.fillTriangle(SCREEN_W - 38, ty, SCREEN_W - 38, ty + 6, SCREEN_W - 33, ty + 3, SSD1306_WHITE);
     }
   }
 
@@ -1253,7 +1035,7 @@ void setup() {
       }
     }
     Serial.print(found);
-    Serial.println(F(" peripherique(s)"));
+    Serial.println(F(" device(s)"));
   }
   #endif
 
@@ -1264,7 +1046,7 @@ void setup() {
   bool oledOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   #if BAME_DEBUG
   if (!oledOk) {
-    Serial.println(F("[OLED] ERREUR - non trouve"));
+    Serial.println(F("[OLED] ERROR - not found"));
   } else {
     Serial.println(F("[OLED] OK"));
   }
@@ -1274,20 +1056,20 @@ void setup() {
     display.setTextColor(SSD1306_WHITE);
   }
 
-  // Keypad : charger calibration EEPROM
+  // Load keypad calibration from EEPROM
   const char* btnNames[] = {"CENTER", "UP", "DOWN", "LEFT", "RIGHT"};
   loadCalFromEEPROM();
   computeThresholds();
   keyCalibrated = true;
 
-  // Bouton maintenu au boot -> mode diag/calibration
+  // Button held at boot -> diag/calibration mode
   delay(200);
   if (analogRead(KEY_PIN) < 1000) {
     #define BOOT_CAL_MS 5000
     unsigned long pressStart = millis();
     bool calibrate = false;
 
-    // Jauge 0->100% pendant 5s
+    // Gauge 0->100% over 5s
     while (analogRead(KEY_PIN) < 1000) {
       unsigned long held = millis() - pressStart;
       float pct = (float)held * 100.0f / BOOT_CAL_MS;
@@ -1296,7 +1078,9 @@ void setup() {
       if (oledOk) {
         display.clearDisplay();
         gfx.drawGauge(pct, F("CAL"));
-        gfx.drawText(1, F("Hold = calibrate"));
+        display.setTextSize(1);
+        display.setCursor(16, BLUE_Y + 9);
+        display.print(F("Hold = calibrate"));
         display.display();
       }
 
@@ -1309,7 +1093,7 @@ void setup() {
     waitButtonRelease();
 
     if (calibrate) {
-      // Calibration keypad
+      // Keypad calibration
       delay(300);
       for (int b = 0; b < CAL_BTN_COUNT; b++) {
         int stableMin = 1023;
@@ -1369,7 +1153,7 @@ void setup() {
     }
   }
 
-  // Charger calibration tension depuis EEPROM
+  // Load voltage calibration from EEPROM
   if (loadVcalFromEEPROM()) {
     #if BAME_DEBUG
     Serial.println(F("[VCAL] EEPROM loaded"));
@@ -1382,21 +1166,21 @@ void setup() {
     #endif
   }
 
-  // Charger capacite apprise + tension de charge
-  loadNomFromEEPROM();  // nominal d'abord (fallback)
+  // Load learned capacity
+  loadNomFromEEPROM();  // nominal first (fallback)
   if (!loadCapFromEEPROM()) {
-    // Pas de calibration → fallback sur nominal
+    // No calibration -> fallback to nominal
     batteryCapacityAh = batteryCapacityNom;
     batteryCapacityAs = batteryCapacityNom * 3600.0;
   }
   loadAutoSleepFromEEPROM();
-  // calCoulombs repart a 0 a chaque boot (segment frais)
+  // calCoulombs resets to 0 on each boot (fresh segment)
 
   // Init INA226
   bool inaOk = ina.begin();
   if (!inaOk) {
     #if BAME_DEBUG
-    Serial.println(F("[INA226] ERREUR - non trouve"));
+    Serial.println(F("[INA226] ERROR - not found"));
     #endif
   } else {
     #if BAME_DEBUG
@@ -1415,7 +1199,7 @@ void setup() {
   }
 
   #if BAME_DEBUG
-  Serial.println(F("--- Demarrage ---"));
+  Serial.println(F("--- Start ---"));
   #endif
   lastMeasure = millis();
   lastInteraction = millis();
@@ -1424,7 +1208,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Gestion bouton
+  // Button handling
   Button b = readButton();
   if (b != BTN_NONE) {
     if (oledSleeping) {
@@ -1436,12 +1220,12 @@ void loop() {
     lastInteraction = millis();
   }
 
-  // Auto-sleep ecran apres 60s
+  // Screen auto-sleep after 60s
   if (!oledSleeping && (millis() - lastInteraction >= AUTO_SLEEP_MS)) {
     enterOledSleep();
   }
 
-  // Deep sleep auto apres 5min
+  // Auto deep sleep after 5min
   if (autoDeepSleep && (millis() - lastInteraction >= AUTO_DEEPSLEEP_MS)) {
     enterDeepSleep();
     lastMeasure = millis();
@@ -1457,7 +1241,7 @@ void loop() {
     gfx.tick();
     updateDisplay();
     #if BAME_DEBUG
-    if (demoMode) debugSerial();
+    debugSerial();
     #endif
   }
 }
