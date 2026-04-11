@@ -124,18 +124,6 @@ pio run -e prod -t upload
 | CENTER in menu | Enter edit / save |
 | LEFT in menu | Cancel edit / go back |
 
-## Simulation
-
-A Python simulation validates the calibration algorithm:
-
-```bash
-# Run a scenario
-python sim/calibration_sim.py --scenario multicycle --capacity 50 --nominal 80
-
-# Optimize parameters with genetic algorithm
-python sim/optimize.py --generations 15 --population 15
-```
-
 ## License
 
 MIT — see [LICENSE.txt](LICENSE.txt)
