@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.4
+
+- INA226 current auto-zero: offset measured at stable rest, applied to all readings
+- Current dead band (±50mA) to eliminate -0.0A display
+- Charging invalidation requires 5s sustained current before resetting calibration segment
+- Calibration counter visible at rest (hidden only when charging or eco mode)
+- 3 visual states for calibration: blocked (blink), at rest (steady), accumulating (play triangle blinks)
+- Removed Hardware diag page and Reset cal menu item (Reset ALL covers both)
+- Info cal always shows estimated capacity (no more "--")
+- Simplified menu: Capacity, Eco mode, Info cal, Reset ALL
+
 ## v1.3
 
 Calibration accuracy improvements:

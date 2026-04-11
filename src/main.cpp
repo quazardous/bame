@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.3"
+#define BAME_VERSION "1.4"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -66,6 +66,9 @@ float vbatMax = VBAT_FULL_DEFAULT;
 float vbatMin = VBAT_EMPTY_DEFAULT;
 float lastRestVoltage = 0;
 
+// INA226 current offset auto-zero (measured at stable rest)
+float currentOffset = 0;
+
 // Battery capacity
 float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominal (user)
 float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimated (calibration or nominal fallback)
@@ -74,6 +77,7 @@ bool capacityKnown = false;   // true if reliable calibration
 
 // Capacity calibration by exponential doubling
 float calCoulombs = 0;          // accumulated coulombs for current segment
+float calChargeSec = 0;         // seconds of sustained charging
 float calTarget = 0;            // coulomb target (0 = initial time mode)
 float calStartVoltage = 0;      // rest voltage at segment start
 unsigned long calStartMs = 0;   // segment start timestamp
@@ -493,61 +497,6 @@ float socFromVoltage(float v) {
 // Diagnostics
 // ===========================================
 
-// --- Hardware diag (all in one screen) ---
-extern int __heap_start, *__brkval;
-int freeRAM() {
-  int v;
-  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
-}
-
-void diagHW(const __FlashStringHelper* title) {
-  while (true) {
-    display.clearDisplay();
-    gfx.drawTitle(title);
-    display.setTextSize(1);
-    display.setCursor(0, BLUE_Y);
-
-    // Line 1: Version + RAM
-    display.print(F("v" BAME_VERSION " RAM:"));
-    display.print(freeRAM());
-
-    // Line 2: I2C devices
-    display.setCursor(0, BLUE_Y + 9);
-    display.print(F("I2C:"));
-    for (byte addr = 1; addr < 127; addr++) {
-      Wire.beginTransmission(addr);
-      if (Wire.endTransmission() == 0) {
-        display.print(F(" 0x"));
-        if (addr < 16) display.print('0');
-        display.print(addr, HEX);
-      }
-    }
-
-    // Line 3: INA226 live
-    display.setCursor(0, BLUE_Y + 18);
-    float v = ina.getBusVoltage();
-    float a = ina.getCurrent();
-    display.print(v, 2); display.print(F("V "));
-    display.print(a, 2); display.print(F("A "));
-    display.print(v * abs(a), 1); display.print('W');
-
-    // Line 4: Uptime
-    display.setCursor(0, BLUE_Y + 27);
-    display.print(F("Up:"));
-    unsigned long s = millis() / 1000;
-    if (s >= 3600) { display.print(s / 3600); display.print(F("h")); }
-    if (s >= 60) { display.print((s % 3600) / 60); display.print(F("m")); }
-    display.print(s % 60); display.print('s');
-
-    display.display();
-
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT) break;
-    delay(200);
-  }
-  waitButtonRelease();
-}
-
 // --- Battery: info page (read only) ---
 void batteryInfo(const __FlashStringHelper* title) {
   while (true) {
@@ -559,11 +508,7 @@ void batteryInfo(const __FlashStringHelper* title) {
     // Line 1: Estimated capacity [nominal]
     display.setCursor(0, BLUE_Y);
     display.print(F("Cap:"));
-    if (capacityKnown) {
-      display.print((int)batteryCapacityAh);
-    } else {
-      display.print(F("--"));
-    }
+    display.print((int)batteryCapacityAh);
     display.print(F("Ah ["));
     display.print((int)batteryCapacityNom);
     display.print(F("]"));
@@ -590,7 +535,7 @@ void batteryInfo(const __FlashStringHelper* title) {
     else display.print('-');
     display.print('V');
 
-    // Line 4: Vmax/Vmin
+    // Line 4: Vmax/Vmin + current offset
     display.setCursor(0, BLUE_Y + 27);
     display.print(vbatMax, 2);
     display.print('/');
@@ -607,7 +552,7 @@ void batteryInfo(const __FlashStringHelper* title) {
 }
 
 // --- SYSTEM menu (flat) ---
-#define SYS_COUNT 6
+#define SYS_COUNT 4
 
 void settingsMenu() {
   uint8_t sel = 0;
@@ -637,18 +582,10 @@ void settingsMenu() {
     // 2: Info cal
     gfx.drawMenuItem(2, '>', F("Info cal"), NULL, sel == 2);
 
-    // 3: Reset cal
-    gfx.drawMenuItem(3, ' ', F("Reset cal"),
+    // 3: Reset ALL
+    gfx.drawMenuItem(3, ' ', F("Reset ALL"),
       editing == 3 ? (tmpConfirm ? "YES" : "NO") : "",
       sel == 3, editing == 3);
-
-    // 4: Hardware
-    gfx.drawMenuItem(4, '>', F("Hardware"), NULL, sel == 4);
-
-    // 5: Reset ALL
-    gfx.drawMenuItem(5, ' ', F("Reset ALL"),
-      editing == 5 ? (tmpConfirm ? "YES" : "NO") : "",
-      sel == 5, editing == 5);
 
     display.display();
 
@@ -660,12 +597,12 @@ void settingsMenu() {
         case BTN_UP:
           if (editing == 0) { tmpCap += 1; if (tmpCap > 500) tmpCap = 500; }
           else if (editing == 1) { tmpSleep = !tmpSleep; }
-          else if (editing == 3 || editing == 5) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
           if (editing == 0) { tmpCap -= 1; if (tmpCap < 1) tmpCap = 1; }
           else if (editing == 1) { tmpSleep = !tmpSleep; }
-          else if (editing == 3 || editing == 5) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_CENTER:
           if (editing == 0) {
@@ -679,8 +616,6 @@ void settingsMenu() {
             autoDeepSleep = tmpSleep;
             saveAutoSleepToEEPROM();
           } else if (editing == 3) {
-            if (tmpConfirm) resetCapEEPROM();
-          } else if (editing == 5) {
             if (tmpConfirm) {
               for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
               // Software reboot via watchdog
@@ -704,7 +639,6 @@ void settingsMenu() {
         case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
         case BTN_CENTER:
           if (sel == 2) { waitButtonRelease(); batteryInfo(F("Info cal")); }
-          else if (sel == 4) { waitButtonRelease(); diagHW(F("Hardware")); }
           else {
             editing = sel;
             tmpCap = batteryCapacityNom;
@@ -728,7 +662,11 @@ void settingsMenu() {
 
 // --- Sensor readings ---
 float readVoltage() { return ina.getBusVoltage(); }
-float readCurrent() { return ina.getCurrent(); }
+float readCurrent() {
+  float c = ina.getCurrent() - currentOffset;
+  if (abs(c) < 0.05) c = 0;  // dead band to avoid -0.0 display
+  return c;
+}
 float readPower() { return ina.getPower(); }
 
 void updateMeasurements() {
@@ -771,11 +709,18 @@ void updateMeasurements() {
   //    after a charge event (surface charge, hysteresis).
   if (current > 0) {
     calCoulombs += current * dtSeconds;
+    calChargeSec = 0;
   } else if (current < -VBAT_REST_CURRENT) {
-    // Charging detected: invalidate current segment
-    calCoulombs = 0;
-    calTarget = 0;
-    calStartVoltage = 0;
+    // Invalidate only after sustained charging (>5s)
+    calChargeSec += dtSeconds;
+    if (calChargeSec >= 5.0) {
+      calCoulombs = 0;
+      calTarget = 0;
+      calStartVoltage = 0;
+      calChargeSec = 0;
+    }
+  } else {
+    calChargeSec = 0;
   }
 
   // 4) Rest detection (stable for 5s before trusting voltage)
@@ -787,16 +732,16 @@ void updateMeasurements() {
     if (restSince == 0) restSince = now;
     bool stableRest = (now - restSince >= 5000);
 
-    // SOC blend: only after 5s stable rest, gentle correction (5%)
-    //   Without this guard the blend runs every 100ms and converges
-    //   to the voltage estimate in ~3s, making coulomb counting
-    //   pointless at rest. On the flat LFP curve (13.1-13.4V spans
-    //   30-90% SOC), a 10mV error → ~5% SOC jump if blended too fast.
+    // SOC blend: only after 5s stable rest, gentle 5% correction
     if (stableRest) {
       float socV = socFromVoltage(voltage);
       socPercent = socPercent * 0.95 + socV * 0.05;
       coulombCount = (socPercent / 100.0) * batteryCapacityAs;
       lastRestVoltage = voltage;
+      // Auto-zero current offset: at stable rest, any reading is pure offset.
+      // current = raw - offset, so raw = current + offset
+      float raw = current + currentOffset;
+      currentOffset = currentOffset * 0.9 + raw * 0.1;
       // Initialize segment start if not set yet
       if (calStartVoltage == 0) {
         calStartVoltage = voltage;
