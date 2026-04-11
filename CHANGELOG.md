@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8
+
+- Removed auto eco mode activation (manual toggle only)
+- Removed capacityTrusted flag (calibration runs continuously, self-stabilizes)
+- Changing nominal capacity now always resets estimated capacity
+- Optimized parameters from genetic simulation:
+  - First calibration step: 2 min (was 1 min)
+  - Vmin/Vmax fast convergence: 0.04 (was 0.01)
+  - Charge invalidation: 10s sustained >1A (was 5s)
+  - SOC rest blend: 8% (was 5%)
+
 ## v1.7
 
 - Unified weighted convergence: no more 30% threshold for first estimate

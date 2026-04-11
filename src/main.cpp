@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.7"
+#define BAME_VERSION "1.8"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -38,7 +38,7 @@
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
 #define VBAT_CHARGE_CURRENT 1.0  // min current to consider real charging
-#define VBAT_CONVERGE_FAST 0.01   // fast convergence (first calibration)
+#define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
 
 // EEPROM layout for voltage calibration (after keypad: addr 11+)
@@ -75,7 +75,6 @@ float currentOffset = 0;
 float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominal (user)
 float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimated (calibration or nominal fallback)
 float batteryCapacityAs = BATTERY_CAPACITY_AH * 3600.0;
-bool capacityTrusted = false;   // true when calibration has converged enough
 
 // Capacity calibration by exponential doubling
 float calCoulombs = 0;          // accumulated coulombs for current segment
@@ -84,7 +83,7 @@ int8_t calLastDeltaSoc = 0;     // delta SOC% of last completed cycle
 float calTarget = 0;            // coulomb target (0 = initial time mode)
 float calStartVoltage = 0;      // rest voltage at segment start
 unsigned long calStartMs = 0;   // segment start timestamp
-#define CAL_INITIAL_TIME_MS  60000   // 1 min for first step
+#define CAL_INITIAL_TIME_MS  120000  // 2 min for first step (longer = bigger delta SOC = better first estimate)
 #define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
 
 bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
@@ -306,7 +305,6 @@ bool loadCapFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
   if (batteryCapacityAh < 1.0 || batteryCapacityAh > 500.0) batteryCapacityAh = batteryCapacityNom;
   batteryCapacityAs = batteryCapacityAh * 3600.0;
-  capacityTrusted = true;
   return true;
 }
 
@@ -320,7 +318,6 @@ bool loadNomFromEEPROM() {
 
 void resetCapEEPROM() {
   EEPROM.write(EEPROM_CAP_MAGIC_ADDR, 0xFF);
-  capacityTrusted = false;
   batteryCapacityAh = batteryCapacityNom;  // fallback to nominal
   batteryCapacityAs = batteryCapacityNom * 3600.0;
   calCoulombs = 0;
@@ -632,10 +629,9 @@ void settingsMenu() {
           if (editing == 0) {
             batteryCapacityNom = tmpCap;
             saveNomToEEPROM();
-            if (!capacityTrusted) {
-              batteryCapacityAh = batteryCapacityNom;
-              batteryCapacityAs = batteryCapacityNom * 3600.0;
-            }
+            batteryCapacityAh = batteryCapacityNom;
+            batteryCapacityAs = batteryCapacityNom * 3600.0;
+            saveCapToEEPROM();
           } else if (editing == 1) {
             cellCount = tmpCells;
             saveCellsToEEPROM();
@@ -746,7 +742,7 @@ void updateMeasurements() {
   } else if (current < -VBAT_CHARGE_CURRENT) {
     // Invalidate only after sustained real charging (>1A for >5s)
     calChargeSec += dtSeconds;
-    if (calChargeSec >= 5.0) {
+    if (calChargeSec >= 10.0) { // 10s sustained >1A to invalidate (tolerates compressor cycling)
       calCoulombs = 0;
       calTarget = 0;
       calStartVoltage = 0;
@@ -768,7 +764,7 @@ void updateMeasurements() {
     // SOC blend: only after 5s stable rest, gentle 5% correction
     if (stableRest) {
       float socV = socFromVoltage(voltage);
-      socPercent = socPercent * 0.95 + socV * 0.05;
+      socPercent = socPercent * 0.92 + socV * 0.08; // 8% blend per reading at stable rest (optimized from 5%)
       coulombCount = (socPercent / 100.0) * batteryCapacityAs;
       lastRestVoltage = voltage;
       // Auto-zero current offset: at stable rest, any reading is pure offset.
@@ -815,14 +811,6 @@ void updateMeasurements() {
         batteryCapacityAh = batteryCapacityAh * (1.0 - weight) + estAh * weight;
         batteryCapacityAs = batteryCapacityAh * 3600.0;
         saveCapToEEPROM();
-        // Trust capacity once it has moved significantly from nominal
-        if (!capacityTrusted && abs(batteryCapacityAh - batteryCapacityNom) > batteryCapacityNom * 0.05) {
-          capacityTrusted = true;
-          if (!autoDeepSleep) {
-            autoDeepSleep = true;
-            saveAutoSleepToEEPROM();
-          }
-        }
       }
     }
 
