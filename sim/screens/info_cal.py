@@ -146,7 +146,7 @@ if __name__ == "__main__":
         try:
             import cairosvg
         except ImportError:
-            print("Error: PNG requires cairosvg.  Install with: pip install cairosvg")
+            print("Error: PNG requires cairosvg. Install with: pip install cairosvg")
             raise SystemExit(1)
         svg = d.to_svg(scale=a.scale)
         cairosvg.svg2png(bytestring=svg.encode(), write_to=out)

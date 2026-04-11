@@ -47,7 +47,7 @@ def _load_script(path: str):
     return module
 
 
-def _svg_to_png(svg_str: str, out_path: str, scale: int) -> None:
+def _svg_to_png(svg_str: str, out_path: str) -> None:
     """Convert SVG string to PNG using cairosvg."""
     try:
         import cairosvg
@@ -126,7 +126,7 @@ def main():
         disp.write_svg(out_path, scale=args.scale)
     else:  # png
         svg_str = disp.to_svg(scale=args.scale)
-        _svg_to_png(svg_str, out_path, args.scale)
+        _svg_to_png(svg_str, out_path)
 
 
 if __name__ == "__main__":
