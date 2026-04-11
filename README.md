@@ -16,31 +16,31 @@ Firmware for a LiFePO4 12V battery monitor with automatic capacity calibration. 
 
 ### Main display — discharging
 
-![Discharging](docs/screenshots/main_discharging.svg)
-
-Gauge (yellow) + voltage, remaining Ah, power, current, time left. Bottom right: calibration counter with play triangle (accumulating).
+![Discharging](docs/screenshots/main_discharge.png)
 
 ### Main display — charging
 
-![Charging](docs/screenshots/main_charging.svg)
+![Charging](docs/screenshots/main_charge.png)
 
-Charging detected: battery animation, charge time estimate.
+### Main display — at rest
+
+![At rest](docs/screenshots/main_rest.png)
 
 ### No battery
 
-![No battery](docs/screenshots/main_blocked.svg)
+![No battery](docs/screenshots/no_battery.png)
 
 ### Settings menu
 
-![Menu](docs/screenshots/settings_menu.svg)
+![Menu](docs/screenshots/menu.png)
 
-Long press center (0.5s) to open. Inverse video = selected item.
+### Editing a value
+
+![Editing](docs/screenshots/menu_edit.png)
 
 ### Info cal page
 
-![Info cal](docs/screenshots/info_cal.svg)
-
-Estimated capacity [nominal], calibration segment progress, voltage range.
+![Info cal](docs/screenshots/info_cal.png)
 
 ## How it works
 

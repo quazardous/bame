@@ -47,19 +47,23 @@ def _load_script(path: str):
     return module
 
 
-def _svg_to_png(svg_str: str, out_path: str) -> None:
-    """Convert SVG string to PNG using cairosvg."""
-    try:
-        import cairosvg
-    except ImportError:
-        print(
-            "Error: cairosvg is required for PNG output.\n"
-            "Install it with:  pip install cairosvg",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    cairosvg.svg2png(bytestring=svg_str.encode("utf-8"), write_to=out_path)
+def _framebuffer_to_png(display, out_path: str, scale: int) -> None:
+    """Convert display framebuffer to PNG using Pillow."""
+    from PIL import Image
+    from oled_svg import SCREEN_W, SCREEN_H, YELLOW_H
+    W, H = SCREEN_W, SCREEN_H
+    YELLOW = (255, 220, 0)
+    BLUE = (80, 180, 255)
+    img = Image.new('RGB', (W * scale, H * scale), (0, 0, 0))
+    pixels = img.load()
+    for y in range(H):
+        color = YELLOW if y < YELLOW_H else BLUE
+        for x in range(W):
+            if display._buf[y * W + x]:
+                for dy in range(scale):
+                    for dx in range(scale):
+                        pixels[x * scale + dx, y * scale + dy] = color
+    img.save(out_path)
     print(f"PNG written to {out_path}")
 
 
@@ -125,8 +129,7 @@ def main():
     if args.format == "svg":
         disp.write_svg(out_path, scale=args.scale)
     else:  # png
-        svg_str = disp.to_svg(scale=args.scale)
-        _svg_to_png(svg_str, out_path)
+        _framebuffer_to_png(disp, out_path, args.scale)
 
 
 if __name__ == "__main__":
