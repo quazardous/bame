@@ -1,6 +1,6 @@
 # BAME - Battery Monitor
 
-Firmware for a LiFePO4 4S battery monitor with automatic capacity calibration.
+Firmware for a LiFePO4 12V battery monitor with automatic capacity calibration. Voltage range auto-calibrates from actual battery readings.
 
 ## Features
 
