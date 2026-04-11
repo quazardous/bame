@@ -10,24 +10,69 @@
 | Keypad | Foxeer Key23 | 5-button analog on A3 with 10K pullup |
 | Action button | Momentary NO pushbutton | Pin D2, pulled to GND, used for wake-up (INT0) |
 
-## Wiring
+## Wiring diagram
 
-### I2C bus (shared)
+```
+                          LFP Battery (12V/24V)
+                          (+)             (-)
+                           |               |
+                           |          +---------+
+                           |          | SHUNT   |
+                           |          | 2.5mOhm |
+                           |          +---------+
+                           |           |       |
+                           |         IN+     IN-    INA226
+                           +---VBUS---+       |     module
+                           |          | SDA --+---> A4 (MCU)
+                           |          | SCL --+---> A5 (MCU)
+                           |          | VCC --+---> 5V
+                           |          | GND --+---> GND
+                           |          +-------+
+                           |               |
+                           |     +---------+---------+
+                           |     |                   |
+                           |  +--+--+          +-----+-----+
+                           |  | REG |          |   LOAD     |
+                           |  | 5V  |          +-----+-----+
+                           |  +--+--+                |
+                           |     |                   |
+                           +-----+-------------------+
+                                 |
+                           +-----+-----+
+                           |  Arduino  |
+                           |  Nano /   |
+                           | ATmega328 |
+                           |           |
+                           |  A4 = SDA |---+--- SSD1306 OLED (0x3C)
+                           |  A5 = SCL |---+    (shared I2C bus)
+                           |           |
+                           |  A3 ------|--> Foxeer Key23 (analog)
+                           |           |      + 10K pullup to VCC
+                           |           |
+                           |  D2 ------|--> Action button (NO to GND)
+                           |           |      (internal pullup)
+                           +-----------+
+```
 
-| Signal | Pin |
-|--------|-----|
-| SDA | A4 |
-| SCL | A5 |
+### Connections summary
 
-Both INA226 and SSD1306 share the I2C bus.
+| MCU Pin | Connected to | Notes |
+|---------|-------------|-------|
+| A4 (SDA) | INA226 SDA + OLED SDA | Shared I2C bus |
+| A5 (SCL) | INA226 SCL + OLED SCL | Shared I2C bus |
+| A3 | Foxeer Key23 signal | 10K pullup to VCC |
+| D2 | Action button | NO to GND, INT0 wake-up |
+| 5V | INA226 VCC + OLED VCC | From regulator |
+| GND | All GND | Common ground |
 
 ### INA226
 
 The INA226 measures battery voltage and current through a shunt resistor.
 
 - **Shunt**: 2.5mOhm (0.0025 Ohm) rated for 30A+
-- **Bus voltage**: connected to battery positive (measures 0-36V)
-- **Shunt inputs**: across the shunt resistor in the battery negative path
+- **VBUS**: connected to battery positive (measures 0-36V)
+- **IN+ / IN-**: across the shunt resistor in the battery negative path
+- Current flows: Battery(-) → IN+ → SHUNT → IN- → Load/GND
 
 ### Keypad (Foxeer Key23)
 

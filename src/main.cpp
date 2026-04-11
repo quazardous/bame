@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.5"
+#define BAME_VERSION "1.6"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -28,14 +28,12 @@
 #define ACTION_BTN_PIN 2
 
 // LiFePO4 battery
-#define LFP_CELL_COUNT      4
+#define LFP_CELL_DEFAULT    4
+#define LFP_CELL_FULL       3.65
+#define LFP_CELL_EMPTY      2.50
 #define BATTERY_CAPACITY_AH 80.0
 #define SHUNT_RESISTANCE    0.0025
 #define MAX_CURRENT         30.0
-
-// LFP voltage thresholds (factory defaults, overridden by EEPROM)
-#define VBAT_FULL_DEFAULT   (LFP_CELL_COUNT * 3.65)
-#define VBAT_EMPTY_DEFAULT  (LFP_CELL_COUNT * 2.50)
 
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
@@ -57,14 +55,16 @@
 #define EEPROM_NOM_ADDR       27  // 1 x float = 4 bytes (27-30)
 #define EEPROM_NOM_MAGIC_VAL  0xDD
 
-// addr 31-35 : free
+// EEPROM layout for cell count (addr 31)
+#define EEPROM_CELLS_ADDR 31  // 1 byte: cell count (0xFF = default)
 
 // EEPROM layout for auto deep sleep
 #define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
 
-// Dynamic voltages
-float vbatMax = VBAT_FULL_DEFAULT;
-float vbatMin = VBAT_EMPTY_DEFAULT;
+// Cell count and dynamic voltages
+uint8_t cellCount = LFP_CELL_DEFAULT;
+float vbatMax = LFP_CELL_DEFAULT * LFP_CELL_FULL;
+float vbatMin = LFP_CELL_DEFAULT * LFP_CELL_EMPTY;
 float lastRestVoltage = 0;
 
 // INA226 current offset auto-zero (measured at stable rest)
@@ -251,7 +251,6 @@ void enterDeepSleep() {
 // Tolerance = min(left gap, right gap) / 2
 int keyCalVals[CAL_BTN_COUNT] = {838, 616, 1, 748, 416}; // defaults with 10k pullup
 
-bool keyCalibrated = false;
 
 void saveCalToEEPROM() {
   EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
@@ -280,9 +279,11 @@ bool loadVcalFromEEPROM() {
   EEPROM.get(EEPROM_VCAL_ADDR, vbatMax);
   EEPROM.get(EEPROM_VCAL_ADDR + sizeof(float), vbatMin);
   // Sanity check
-  if (vbatMax < VBAT_EMPTY_DEFAULT || vbatMax > VBAT_FULL_DEFAULT * 1.4) vbatMax = VBAT_FULL_DEFAULT;
-  if (vbatMin < VBAT_EMPTY_DEFAULT * 0.5 || vbatMin > VBAT_FULL_DEFAULT) vbatMin = VBAT_EMPTY_DEFAULT;
-  if (vbatMin >= vbatMax) { vbatMax = VBAT_FULL_DEFAULT; vbatMin = VBAT_EMPTY_DEFAULT; }
+  float vFull = cellCount * LFP_CELL_FULL;
+  float vEmpty = cellCount * LFP_CELL_EMPTY;
+  if (vbatMax < vEmpty || vbatMax > vFull * 1.4) vbatMax = vFull;
+  if (vbatMin < vEmpty * 0.5 || vbatMin > vFull) vbatMin = vEmpty;
+  if (vbatMin >= vbatMax) { vbatMax = vFull; vbatMin = vEmpty; }
   return true;
 }
 
@@ -325,6 +326,12 @@ void resetCapEEPROM() {
   calTarget = 0;
   calStartVoltage = 0;
   calStartMs = 0;
+}
+
+void saveCellsToEEPROM() { EEPROM.write(EEPROM_CELLS_ADDR, cellCount); }
+void loadCellsFromEEPROM() {
+  uint8_t v = EEPROM.read(EEPROM_CELLS_ADDR);
+  if (v >= 1 && v <= 16) cellCount = v;
 }
 
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
@@ -371,7 +378,7 @@ int keyThresholds[CAL_BTN_COUNT];
 
 void computeThresholds() {
   // Sort values to find distances
-  int sorted[CAL_BTN_COUNT + 1]; // +1 pour NONE (1023)
+  int sorted[CAL_BTN_COUNT + 1]; // +1 for NONE (1023)
   int sortIdx[CAL_BTN_COUNT];
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
     sorted[i] = keyCalVals[i];
@@ -430,8 +437,6 @@ void waitButtonRelease() {
 // Long press: 2 tiers — SYSTEM menu (1.5s) or deep sleep (3s)
 void checkLongPress() {
   unsigned long pressStart = millis();
-  bool menuTriggered = false;
-
   while (readButton() == BTN_CENTER) {
     unsigned long held = millis() - pressStart;
 
@@ -472,23 +477,22 @@ struct SocPoint {
   float soc;
 };
 
-// Per-cell LFP curve, scaled by LFP_CELL_COUNT at lookup
-#define C(v) ((v) * LFP_CELL_COUNT)
+// Per-cell LFP SOC curve (chemistry-defined shape)
 const SocPoint socCurve[] = {
-  {C(3.65), 100}, {C(3.40),  99}, {C(3.35),  90}, {C(3.325), 70},
-  {C(3.30),  40}, {C(3.275), 30}, {C(3.25),  20}, {C(3.20),  17},
-  {C(3.00),  14}, {C(2.75),   9}, {C(2.50),   0},
+  {3.65, 100}, {3.40,  99}, {3.35,  90}, {3.325, 70},
+  {3.30,  40}, {3.275, 30}, {3.25,  20}, {3.20,  17},
+  {3.00,  14}, {2.75,   9}, {2.50,   0},
 };
-#undef C
 const int socCurveSize = sizeof(socCurve) / sizeof(socCurve[0]);
 
 float socFromVoltage(float v) {
-  // Rescale voltage to dynamic bounds
-  // Curve is defined for VBAT_EMPTY_DEFAULT..VBAT_FULL_DEFAULT
-  // Map v into that range using vbatMin..vbatMax
-  float vScaled = VBAT_EMPTY_DEFAULT +
-    (v - vbatMin) / (vbatMax - vbatMin) *
-    (VBAT_FULL_DEFAULT - VBAT_EMPTY_DEFAULT);
+  // Convert pack voltage to per-cell, rescale to reference curve
+  float vCell = v / cellCount;
+  float vMinCell = vbatMin / cellCount;
+  float vMaxCell = vbatMax / cellCount;
+  float vScaled = LFP_CELL_EMPTY +
+    (vCell - vMinCell) / (vMaxCell - vMinCell) *
+    (LFP_CELL_FULL - LFP_CELL_EMPTY);
 
   if (vScaled >= socCurve[0].voltage) return 100.0;
   if (vScaled <= socCurve[socCurveSize - 1].voltage) return 0.0;
@@ -563,14 +567,15 @@ void batteryInfo(const __FlashStringHelper* title) {
 }
 
 // --- SYSTEM menu (flat) ---
-#define SYS_COUNT 4
+#define SYS_COUNT 5
 
 void settingsMenu() {
   uint8_t sel = 0;
   int8_t editing = -1;
 
   float tmpCap = batteryCapacityNom;
-  bool tmpConfirm = false;  // shared for all YES/NO confirmations
+  uint8_t tmpCells = cellCount;
+  bool tmpConfirm = false;
   bool tmpSleep = autoDeepSleep;
 
   while (true) {
@@ -585,18 +590,23 @@ void settingsMenu() {
     strcat(buf, "Ah");
     gfx.drawMenuItem(0, ' ', F("Capacity"), buf, sel == 0, editing == 0);
 
-    // 1: Sleep
-    gfx.drawMenuItem(1, ' ', F("Eco mode"),
-      (editing == 1 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
-      sel == 1, editing == 1);
+    // 1: Cells
+    itoa(editing == 1 ? tmpCells : cellCount, buf, 10);
+    strcat(buf, "S");
+    gfx.drawMenuItem(1, ' ', F("Cells"), buf, sel == 1, editing == 1);
 
-    // 2: Info cal
-    gfx.drawMenuItem(2, '>', F("Info cal"), NULL, sel == 2);
+    // 2: Eco mode
+    gfx.drawMenuItem(2, ' ', F("Eco mode"),
+      (editing == 2 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
+      sel == 2, editing == 2);
 
-    // 3: Reset ALL
-    gfx.drawMenuItem(3, ' ', F("Reset ALL"),
-      editing == 3 ? (tmpConfirm ? "YES" : "NO") : "",
-      sel == 3, editing == 3);
+    // 3: Info cal
+    gfx.drawMenuItem(3, '>', F("Info cal"), NULL, sel == 3);
+
+    // 4: Reset ALL
+    gfx.drawMenuItem(4, ' ', F("Reset ALL"),
+      editing == 4 ? (tmpConfirm ? "YES" : "NO") : "",
+      sel == 4, editing == 4);
 
     display.display();
 
@@ -607,13 +617,15 @@ void settingsMenu() {
       switch (b) {
         case BTN_UP:
           if (editing == 0) { tmpCap += 1; if (tmpCap > 500) tmpCap = 500; }
-          else if (editing == 1) { tmpSleep = !tmpSleep; }
-          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 1) { tmpCells += 1; if (tmpCells > 16) tmpCells = 16; }
+          else if (editing == 2) { tmpSleep = !tmpSleep; }
+          else if (editing == 4) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
           if (editing == 0) { tmpCap -= 1; if (tmpCap < 1) tmpCap = 1; }
-          else if (editing == 1) { tmpSleep = !tmpSleep; }
-          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 1) { tmpCells -= 1; if (tmpCells < 1) tmpCells = 1; }
+          else if (editing == 2) { tmpSleep = !tmpSleep; }
+          else if (editing == 4) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_CENTER:
           if (editing == 0) {
@@ -624,9 +636,16 @@ void settingsMenu() {
               batteryCapacityAs = batteryCapacityNom * 3600.0;
             }
           } else if (editing == 1) {
+            cellCount = tmpCells;
+            saveCellsToEEPROM();
+            // Reset voltage bounds to new cell count defaults
+            vbatMax = cellCount * LFP_CELL_FULL;
+            vbatMin = cellCount * LFP_CELL_EMPTY;
+            saveVcalToEEPROM();
+          } else if (editing == 2) {
             autoDeepSleep = tmpSleep;
             saveAutoSleepToEEPROM();
-          } else if (editing == 3) {
+          } else if (editing == 4) {
             if (tmpConfirm) {
               for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
               // Software reboot via watchdog
@@ -638,6 +657,7 @@ void settingsMenu() {
           break;
         case BTN_LEFT:
           tmpCap = batteryCapacityNom;
+          tmpCells = cellCount;
           tmpConfirm = false;
           tmpSleep = autoDeepSleep;
           editing = -1;
@@ -649,10 +669,11 @@ void settingsMenu() {
         case BTN_UP: sel = (sel == 0) ? SYS_COUNT - 1 : sel - 1; break;
         case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
         case BTN_CENTER:
-          if (sel == 2) { waitButtonRelease(); batteryInfo(F("Info cal")); }
+          if (sel == 3) { waitButtonRelease(); batteryInfo(F("Info cal")); }
           else {
             editing = sel;
             tmpCap = batteryCapacityNom;
+            tmpCells = cellCount;
             tmpConfirm = false;
             tmpSleep = autoDeepSleep;
           }
@@ -951,7 +972,7 @@ void debugSerial() {
   Serial.print(batteryCapacityAs, 0);
   if (current > 0.5) {
     float hoursLeft = (coulombCount / 3600.0) / current;
-    Serial.print(F(" | Reste: "));
+    Serial.print(F(" | Left: "));
     Serial.print(hoursLeft, 1);
     Serial.print(F("h"));
   }
@@ -971,13 +992,13 @@ void setup() {
   Wire.begin();
   pinMode(KEY_PIN, INPUT);
   pinMode(ACTION_BTN_PIN, INPUT_PULLUP);
-  computeThresholds(); // seuils par defaut
+  computeThresholds(); // default thresholds
 
   #if BAME_DEBUG
   Serial.println(F(""));
   Serial.println(F("========================="));
   Serial.println(F(" BAME Battery Monitor"));
-  Serial.println(F(" LFP 4S 80Ah"));
+  Serial.println(F(" LFP " BAME_VERSION));
   Serial.println(F("========================="));
 
   // Scan I2C
@@ -1019,7 +1040,6 @@ void setup() {
   const char* btnNames[] = {"CENTER", "UP", "DOWN", "LEFT", "RIGHT"};
   loadCalFromEEPROM();
   computeThresholds();
-  keyCalibrated = true;
 
   // Button held at boot -> diag/calibration mode
   delay(200);
@@ -1107,10 +1127,15 @@ void setup() {
         delay(2000);
       }
     } else {
-      // Appui court -> menu reglages
+      // Short press -> settings menu
       settingsMenu();
     }
   }
+
+  // Load cell count first (affects voltage defaults)
+  loadCellsFromEEPROM();
+  vbatMax = cellCount * LFP_CELL_FULL;
+  vbatMin = cellCount * LFP_CELL_EMPTY;
 
   // Load voltage calibration from EEPROM
   if (loadVcalFromEEPROM()) {

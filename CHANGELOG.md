@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.6
+
+- Cell count configurable at runtime via menu (1-16S), stored in EEPROM
+- SOC curve stored as per-cell values, auto-scaled by cell count
+- Changing cell count resets Vmin/Vmax to new defaults
+- Removed unused variables (menuTriggered, keyCalibrated)
+- Initialized vbatMax/vbatMin at declaration (prevent theoretical div-by-zero)
+- All remaining French comments translated to English
+- Wiring diagram added to HARDWARE.md
+
 ## v1.5
 
 - Voltage calibration (Vmin/Vmax) now gated behind 5s stable rest (same as capacity calibration)
