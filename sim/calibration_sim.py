@@ -99,6 +99,7 @@ class CalibrationState:
     CAL_INITIAL_TIME_S = 60  # 1 min
     CAL_MIN_COULOMBS = 500.0
     REST_CURRENT = 0.3
+    CHARGE_CURRENT = 1.0
     REST_STABLE_S = 5.0
     CONVERGE_FAST = 0.01
     CONVERGE_SLOW = 0.001
@@ -159,7 +160,7 @@ class CalibrationState:
         if current > 0:
             self.cal_coulombs += current * dt
             self.cal_charge_sec = 0
-        elif current < -self.REST_CURRENT:
+        elif current < -self.CHARGE_CURRENT:
             self.cal_charge_sec += dt
             if self.cal_charge_sec >= 5.0:
                 if self.cal_coulombs > 0 or self.cal_start_voltage > 0:

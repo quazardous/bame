@@ -26,6 +26,7 @@ PARAM_DEFS = [
     ('first_delta_soc_min', 0,     40,     30),
     ('converge_fast',       0.005, 0.05,   0.01),
     ('converge_slow',       0.0005,0.005,  0.001),
+    ('charge_current',      0.3,   5.0,    1.0),
     ('charge_invalidate_s', 1,     30,     5),
 ]
 
@@ -70,6 +71,7 @@ def apply_params(cal, genome):
     # These need custom handling in CalibrationState
     cal._soc_blend = genome['soc_blend_factor']
     cal._first_delta_min = genome['first_delta_soc_min']
+    cal.CHARGE_CURRENT = genome['charge_current']
     cal._charge_inv_s = genome['charge_invalidate_s']
 
 
@@ -92,7 +94,7 @@ def _patched_update(self, voltage, current_raw, dt, time_s):
     if current > 0:
         self.cal_coulombs += current * dt
         self.cal_charge_sec = 0
-    elif current < -self.REST_CURRENT:
+    elif current < -getattr(self, 'CHARGE_CURRENT', 1.0):
         self.cal_charge_sec += dt
         if self.cal_charge_sec >= charge_inv_s:
             if self.cal_coulombs > 0 or self.cal_start_voltage > 0:
