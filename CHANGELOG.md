@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.1
+
+- Separate charging detection threshold (1A) from rest threshold (0.3A)
+- Prevents compressor cycling from invalidating calibration segments
+- Added calibration simulation tool (sim/)
+
 ## v1.6
 
 - Cell count configurable at runtime via menu (1-16S), stored in EEPROM

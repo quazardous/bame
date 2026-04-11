@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.6"
+#define BAME_VERSION "1.6.1"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -37,6 +37,7 @@
 
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
+#define VBAT_CHARGE_CURRENT 1.0  // min current to consider real charging
 #define VBAT_CONVERGE_FAST 0.01   // fast convergence (first calibration)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
 
@@ -742,8 +743,8 @@ void updateMeasurements() {
   if (current > 0) {
     calCoulombs += current * dtSeconds;
     calChargeSec = 0;
-  } else if (current < -VBAT_REST_CURRENT) {
-    // Invalidate only after sustained charging (>5s)
+  } else if (current < -VBAT_CHARGE_CURRENT) {
+    // Invalidate only after sustained real charging (>1A for >5s)
     calChargeSec += dtSeconds;
     if (calChargeSec >= 5.0) {
       calCoulombs = 0;
