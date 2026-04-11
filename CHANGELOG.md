@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.7
+
+- Unified weighted convergence: no more 30% threshold for first estimate
+- Every calibration segment contributes, weighted by delta SOC (5%-50%)
+- Capacity starts from nominal and converges with each rest-to-rest cycle
+- capacityKnown renamed to capacityTrusted (trusted when estimate drifts >5% from nominal)
+- Eco mode activates on trust, not on first big segment
+- Simulation updated to match new calibration logic
+
 ## v1.6.1
 
 - Separate charging detection threshold (1A) from rest threshold (0.3A)

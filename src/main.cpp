@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.6.1"
+#define BAME_VERSION "1.7"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -75,7 +75,7 @@ float currentOffset = 0;
 float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominal (user)
 float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimated (calibration or nominal fallback)
 float batteryCapacityAs = BATTERY_CAPACITY_AH * 3600.0;
-bool capacityKnown = false;   // true if reliable calibration
+bool capacityTrusted = false;   // true when calibration has converged enough
 
 // Capacity calibration by exponential doubling
 float calCoulombs = 0;          // accumulated coulombs for current segment
@@ -306,7 +306,7 @@ bool loadCapFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
   if (batteryCapacityAh < 1.0 || batteryCapacityAh > 500.0) batteryCapacityAh = batteryCapacityNom;
   batteryCapacityAs = batteryCapacityAh * 3600.0;
-  capacityKnown = true;
+  capacityTrusted = true;
   return true;
 }
 
@@ -320,7 +320,7 @@ bool loadNomFromEEPROM() {
 
 void resetCapEEPROM() {
   EEPROM.write(EEPROM_CAP_MAGIC_ADDR, 0xFF);
-  capacityKnown = false;
+  capacityTrusted = false;
   batteryCapacityAh = batteryCapacityNom;  // fallback to nominal
   batteryCapacityAs = batteryCapacityNom * 3600.0;
   calCoulombs = 0;
@@ -632,7 +632,7 @@ void settingsMenu() {
           if (editing == 0) {
             batteryCapacityNom = tmpCap;
             saveNomToEEPROM();
-            if (!capacityKnown) {
+            if (!capacityTrusted) {
               batteryCapacityAh = batteryCapacityNom;
               batteryCapacityAs = batteryCapacityNom * 3600.0;
             }
@@ -810,24 +810,18 @@ void updateMeasurements() {
     if (deltaSoc > 5.0) {
       float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
       if (estAh > 1.0 && estAh < 500.0) {
-        if (!capacityKnown) {
-          // First estimate: accept only if delta > 30% (reliable)
-          if (deltaSoc > 30.0) {
-            batteryCapacityAh = estAh;
-            batteryCapacityAs = estAh * 3600.0;
-            capacityKnown = true;
-            saveCapToEEPROM();
-            if (!autoDeepSleep) {
-              autoDeepSleep = true;
-              saveAutoSleepToEEPROM();
-            }
+        // Unified weighted convergence: weight proportional to delta SOC
+        float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
+        batteryCapacityAh = batteryCapacityAh * (1.0 - weight) + estAh * weight;
+        batteryCapacityAs = batteryCapacityAh * 3600.0;
+        saveCapToEEPROM();
+        // Trust capacity once it has moved significantly from nominal
+        if (!capacityTrusted && abs(batteryCapacityAh - batteryCapacityNom) > batteryCapacityNom * 0.05) {
+          capacityTrusted = true;
+          if (!autoDeepSleep) {
+            autoDeepSleep = true;
+            saveAutoSleepToEEPROM();
           }
-        } else {
-          // Weighted convergence: larger delta = more weight
-          float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
-          batteryCapacityAh = batteryCapacityAh * (1.0 - weight) + estAh * weight;
-          batteryCapacityAs = batteryCapacityAh * 3600.0;
-          saveCapToEEPROM();
         }
       }
     }

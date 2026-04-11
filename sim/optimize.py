@@ -23,7 +23,6 @@ PARAM_DEFS = [
     ('rest_stable_s',       2,     30,     5),
     ('rest_current',        0.05,  1.0,    0.3),
     ('soc_blend_factor',    0.01,  0.20,   0.05),
-    ('first_delta_soc_min', 0,     40,     30),
     ('converge_fast',       0.005, 0.05,   0.01),
     ('converge_slow',       0.0005,0.005,  0.001),
     ('charge_current',      0.3,   5.0,    1.0),
@@ -70,7 +69,6 @@ def apply_params(cal, genome):
     cal.CONVERGE_SLOW = genome['converge_slow']
     # These need custom handling in CalibrationState
     cal._soc_blend = genome['soc_blend_factor']
-    cal._first_delta_min = genome['first_delta_soc_min']
     cal.CHARGE_CURRENT = genome['charge_current']
     cal._charge_inv_s = genome['charge_invalidate_s']
 
@@ -142,7 +140,6 @@ def _patched_update(self, voltage, current_raw, dt, time_s):
     else:
         target_reached = self.cal_coulombs >= self.cal_target
 
-    first_delta_min = getattr(self, '_first_delta_min', 30.0)
 
     if (target_reached and self.cal_start_voltage > 0 and self.cal_coulombs > 0
             and abs(current) < self.REST_CURRENT
@@ -157,20 +154,13 @@ def _patched_update(self, voltage, current_raw, dt, time_s):
         if delta_soc > 5.0:
             est_ah = (self.cal_coulombs / 3600.0) / (delta_soc / 100.0)
             if 1.0 < est_ah < 500.0:
-                accepted = False
-                if not self.capacity_known:
-                    if delta_soc > first_delta_min:
-                        self.estimated_ah = est_ah
-                        self.estimated_as = est_ah * 3600.0
-                        self.capacity_known = True
-                        accepted = True
-                else:
-                    weight = max(0.05, min(0.5, delta_soc / 100.0))
-                    self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
-                    self.estimated_as = self.estimated_ah * 3600.0
-                    accepted = True
+                weight = max(0.05, min(0.5, delta_soc / 100.0))
+                self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
+                self.estimated_as = self.estimated_ah * 3600.0
+                if not self.capacity_trusted and abs(self.estimated_ah - self.nominal_ah) > self.nominal_ah * 0.05:
+                    self.capacity_trusted = True
 
-                self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, accepted))
+                self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, True))
 
         self.cal_last_delta_soc = int(delta_soc) if delta_soc > 0 else 0
         self.cal_target = self.cal_coulombs * 2.0
@@ -187,7 +177,8 @@ def evaluate(genome, verbose=False):
 
     for true_ah, nominal_ah, cells, scenario_names in TEST_CASES:
         for scenario_name in scenario_names:
-            dt = 0.1
+            dt = 1.0  # 1s steps (10x faster, same accuracy)
+            dt = 1.0
             battery = Battery(true_ah, cells, voltage_noise=0.005)
 
             # Generate events
@@ -217,7 +208,7 @@ def evaluate(genome, verbose=False):
             soc_error = abs(battery.true_soc - cal.soc_percent) / 100.0
 
             # Penalty if no calibration achieved
-            if not cal.capacity_known:
+            if not cal.capacity_trusted:
                 penalties += 1
                 cap_error = abs(nominal_ah - true_ah) / true_ah  # worst case
 
@@ -225,7 +216,7 @@ def evaluate(genome, verbose=False):
             total_tests += 1
 
             if verbose:
-                status = 'OK' if cal.capacity_known else 'FAIL'
+                status = 'OK' if cal.capacity_trusted else 'FAIL'
                 print(f"  {true_ah}Ah {scenario_name:12s}: "
                       f"est={cal.estimated_ah:5.1f}Ah err={cap_error*100:5.1f}% "
                       f"soc_err={soc_error*100:4.1f}% [{status}]")
@@ -300,10 +291,14 @@ def main():
     for gen in range(args.generations):
         # Evaluate
         scored = []
-        for genome in population:
+        for idx, genome in enumerate(population):
             random.seed(args.seed)  # deterministic evaluation
             f = evaluate(genome)
             scored.append((f, genome))
+            done = gen * pop_size + idx + 1
+            total = args.generations * pop_size
+            print(f"\r  [{done}/{total} {done*100//total}%] Gen {gen+1} ind {idx+1}/{pop_size}", end='', flush=True)
+        print('\r' + ' ' * 60 + '\r', end='')
 
         scored.sort(key=lambda x: x[0])
 

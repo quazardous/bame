@@ -110,7 +110,7 @@ class CalibrationState:
         self.nominal_ah = nominal_ah
         self.estimated_ah = nominal_ah
         self.estimated_as = nominal_ah * 3600.0
-        self.capacity_known = False
+        self.capacity_trusted = False
         # Calibration segment
         self.cal_coulombs = 0
         self.cal_target = 0
@@ -224,25 +224,21 @@ class CalibrationState:
             if delta_soc > 5.0:
                 est_ah = (self.cal_coulombs / 3600.0) / (delta_soc / 100.0)
                 if 1.0 < est_ah < 500.0:
-                    accepted = False
-                    if not self.capacity_known:
-                        if delta_soc > 30.0:
-                            self.estimated_ah = est_ah
-                            self.estimated_as = est_ah * 3600.0
-                            self.capacity_known = True
-                            self.auto_deep_sleep = True
-                            accepted = True
-                    else:
-                        weight = max(0.05, min(0.5, delta_soc / 100.0))
-                        self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
-                        self.estimated_as = self.estimated_ah * 3600.0
-                        accepted = True
+                    # Unified weighted convergence
+                    weight = max(0.05, min(0.5, delta_soc / 100.0))
+                    self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
+                    self.estimated_as = self.estimated_ah * 3600.0
+                    # Trust once moved >5% from nominal
+                    if not self.capacity_trusted and abs(self.estimated_ah - self.nominal_ah) > self.nominal_ah * 0.05:
+                        self.capacity_trusted = True
+                        self.auto_deep_sleep = True
 
-                    tag = 'ACCEPTED' if accepted else 'REJECTED (dSOC<30%)'
-                    self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, accepted))
+                    self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, True))
+                    trusted = 'T' if self.capacity_trusted else ''
                     self.log.append(
-                        f"  [{time_s:.0f}s] CAL {tag}: {self.cal_coulombs/3600:.1f}Ah "
-                        f"dSOC={delta_soc:.1f}% est={est_ah:.1f}Ah -> cap={self.estimated_ah:.1f}Ah"
+                        f"  [{time_s:.0f}s] CAL: {self.cal_coulombs/3600:.1f}Ah "
+                        f"dSOC={delta_soc:.1f}% w={weight:.2f} est={est_ah:.1f}Ah "
+                        f"-> cap={self.estimated_ah:.1f}Ah {trusted}"
                     )
 
             self.cal_last_delta_soc = int(delta_soc)
@@ -437,7 +433,7 @@ def run_simulation(true_ah, nominal_ah, cells, noise, scenario_name):
     print(f"True capacity:    {true_ah:.1f} Ah")
     print(f"Est. capacity:    {cal.estimated_ah:.1f} Ah")
     print(f"Error:            {abs(true_ah - cal.estimated_ah):.1f} Ah ({abs(true_ah - cal.estimated_ah)/true_ah*100:.1f}%)")
-    print(f"Calibration known: {cal.capacity_known}")
+    print(f"Capacity trusted:  {cal.capacity_trusted}")
     print(f"Eco mode:         {cal.auto_deep_sleep}")
     print(f"Current offset:   {cal.current_offset*1000:.1f}mA")
     print(f"Vmax/Vmin:        {cal.vbat_max:.3f}/{cal.vbat_min:.3f}V")
