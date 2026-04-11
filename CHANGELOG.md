@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5
+
+- Voltage calibration (Vmin/Vmax) now gated behind 5s stable rest (same as capacity calibration)
+- INA226 averaging increased from 4 to 16 samples (reduced noise)
+- Deep sleep: first INA226 reading after wake-up discarded (bus restart noise)
+- LFP_CELL_COUNT define: change one line to support 12V/24V/any cell count
+- SOC curve defined per-cell and auto-scaled by cell count
+- Sanity checks for Vmin/Vmax derived from cell count instead of hardcoded
+- Last completed calibration cycle delta SOC% shown in Info cal
+
 ## v1.4
 
 - INA226 current auto-zero: offset measured at stable rest, applied to all readings

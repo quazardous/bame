@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.4"
+#define BAME_VERSION "1.5"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -27,14 +27,15 @@
 // Action button (NO, pull to GND)
 #define ACTION_BTN_PIN 2
 
-// LiFePO4 4S 80Ah battery
+// LiFePO4 battery
+#define LFP_CELL_COUNT      4
 #define BATTERY_CAPACITY_AH 80.0
-#define SHUNT_RESISTANCE 0.0025
-#define MAX_CURRENT 30.0
+#define SHUNT_RESISTANCE    0.0025
+#define MAX_CURRENT         30.0
 
-// LFP 4S voltage thresholds (factory defaults, overridden by EEPROM)
-#define VBAT_FULL_DEFAULT   14.6  // 4 x 3.65V
-#define VBAT_EMPTY_DEFAULT  10.0  // 4 x 2.50V
+// LFP voltage thresholds (factory defaults, overridden by EEPROM)
+#define VBAT_FULL_DEFAULT   (LFP_CELL_COUNT * 3.65)
+#define VBAT_EMPTY_DEFAULT  (LFP_CELL_COUNT * 2.50)
 
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
@@ -86,6 +87,7 @@ unsigned long calStartMs = 0;   // segment start timestamp
 #define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
 
 bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
+unsigned long restSince = 0;  // timestamp of continuous rest start (0 = not resting)
 
 // --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -191,10 +193,12 @@ void enterDeepSleep() {
       if (wdtCount >= wdtTarget) {
         wdtCount = 0;
 
-        // Measure
+        // Measure (skip first reading after INA226 restart — noisy)
         Wire.begin();
         if (ina.begin()) {
           ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
+          ina.getBusVoltage(); // discard first reading
+          ina.getCurrent();
           voltage = ina.getBusVoltage();
           current = ina.getCurrent();
           updateVoltageCalibration();
@@ -276,8 +280,8 @@ bool loadVcalFromEEPROM() {
   EEPROM.get(EEPROM_VCAL_ADDR, vbatMax);
   EEPROM.get(EEPROM_VCAL_ADDR + sizeof(float), vbatMin);
   // Sanity check
-  if (vbatMax < 10.0 || vbatMax > 20.0) vbatMax = VBAT_FULL_DEFAULT;
-  if (vbatMin < 5.0 || vbatMin > 15.0) vbatMin = VBAT_EMPTY_DEFAULT;
+  if (vbatMax < VBAT_EMPTY_DEFAULT || vbatMax > VBAT_FULL_DEFAULT * 1.4) vbatMax = VBAT_FULL_DEFAULT;
+  if (vbatMin < VBAT_EMPTY_DEFAULT * 0.5 || vbatMin > VBAT_FULL_DEFAULT) vbatMin = VBAT_EMPTY_DEFAULT;
   if (vbatMin >= vbatMax) { vbatMax = VBAT_FULL_DEFAULT; vbatMin = VBAT_EMPTY_DEFAULT; }
   return true;
 }
@@ -336,8 +340,8 @@ void updateVoltageCalibration() {
   if (current < -VBAT_REST_CURRENT) return;
   // Ignore if not at rest
   if (abs(current) > VBAT_REST_CURRENT) return;
-
-  lastRestVoltage = voltage;
+  // Ignore if rest not stable yet (same 5s window as calibration)
+  if (restSince == 0 || (millis() - restSince < 5000)) return;
 
   // Convergence speed: fast if far, slow if close
   float conv;
@@ -468,11 +472,14 @@ struct SocPoint {
   float soc;
 };
 
+// Per-cell LFP curve, scaled by LFP_CELL_COUNT at lookup
+#define C(v) ((v) * LFP_CELL_COUNT)
 const SocPoint socCurve[] = {
-  {14.6, 100}, {13.6,  99}, {13.4,  90}, {13.3,  70},
-  {13.2,  40}, {13.1,  30}, {13.0,  20}, {12.8,  17},
-  {12.0,  14}, {11.0,   9}, {10.0,   0},
+  {C(3.65), 100}, {C(3.40),  99}, {C(3.35),  90}, {C(3.325), 70},
+  {C(3.30),  40}, {C(3.275), 30}, {C(3.25),  20}, {C(3.20),  17},
+  {C(3.00),  14}, {C(2.75),   9}, {C(2.50),   0},
 };
+#undef C
 const int socCurveSize = sizeof(socCurve) / sizeof(socCurve[0]);
 
 float socFromVoltage(float v) {
@@ -731,7 +738,7 @@ void updateMeasurements() {
   //    LFP cells need a few seconds after load removal for the voltage
   //    to settle (internal resistance + diffusion). Readings taken
   //    immediately after load removal can be 20-50mV off.
-  static unsigned long restSince = 0;
+  // restSince is global (used by updateVoltageCalibration too)
   if (abs(current) < VBAT_REST_CURRENT) {
     if (restSince == 0) restSince = now;
     bool stableRest = (now - restSince >= 5000);
@@ -1139,7 +1146,7 @@ void setup() {
     Serial.println(F("[INA226] OK"));
     #endif
     ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
-    ina.setAverage(4);
+    ina.setAverage(16);
   }
 
   // SOC initial
