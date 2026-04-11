@@ -16,74 +16,31 @@ Firmware for a LiFePO4 12V battery monitor with automatic capacity calibration. 
 
 ### Main display — discharging
 
-```
-+------------------------------+
-|############ 64% ############|  <- yellow: SOC gauge
-+------------------------------+
-  13.2V                  51Ah    <- voltage + remaining Ah
-  48W                   3.7A     <- power + current
-  < 13:47              > 1.2Ah   <- time left + cal counter (play = accumulating)
-```
+![Discharging](docs/screenshots/main_discharging.svg)
+
+Gauge (yellow) + voltage, remaining Ah, power, current, time left. Bottom right: calibration counter with play triangle (accumulating).
 
 ### Main display — charging
 
-```
-+------------------------------+
-|##################### 89% ####|
-+------------------------------+
-  14.1V                  71Ah
-  42W                  -3.0A
-  > 02:15              [=== ]    <- charge time + battery animation
-```
+![Charging](docs/screenshots/main_charging.svg)
 
-### Main display — calibration blocked (needs rest)
+Charging detected: battery animation, charge time estimate.
 
-```
-+------------------------------+
-|############ 64% ############|
-+------------------------------+
-  13.2V                  51Ah
-  0W                    0.0A
-  (no current — time hidden)     0.8Ah  <- blinks: waiting for 5s stable rest
-```
+### No battery
+
+![No battery](docs/screenshots/main_blocked.svg)
 
 ### Settings menu
 
-```
-+------------------------------+
-|         BAME V1.8            |
-+------------------------------+
-  Capacity              80Ah
-  Cells                   4S
-  Eco mode               OFF
-> Info cal
-  Reset ALL
-```
+![Menu](docs/screenshots/settings_menu.svg)
 
-### Editing a value
-
-```
-+------------------------------+
-|         BAME V1.8            |
-+------------------------------+
-  Capacity            [85Ah]  <- brackets = editing, UP/DN to change
-  Cells                   4S
-  Eco mode               OFF
-> Info cal
-  Reset ALL
-```
+Long press center (0.5s) to open. Inverse video = selected item.
 
 ### Info cal page
 
-```
-+------------------------------+
-|         INFO CAL             |
-+------------------------------+
-Cap:82Ah [80]                    <- estimated [nominal]
-1.2/2.4Ah (8%)                   <- segment/target (delta SOC%)
-13.28>13.21V                     <- start>end voltage
-14.58/10.02V                     <- Vmax/Vmin auto-calibrated
-```
+![Info cal](docs/screenshots/info_cal.svg)
+
+Estimated capacity [nominal], calibration segment progress, voltage range.
 
 ## How it works
 
