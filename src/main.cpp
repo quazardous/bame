@@ -78,6 +78,7 @@ bool capacityKnown = false;   // true if reliable calibration
 // Capacity calibration by exponential doubling
 float calCoulombs = 0;          // accumulated coulombs for current segment
 float calChargeSec = 0;         // seconds of sustained charging
+int8_t calLastDeltaSoc = 0;     // delta SOC% of last completed cycle
 float calTarget = 0;            // coulomb target (0 = initial time mode)
 float calStartVoltage = 0;      // rest voltage at segment start
 unsigned long calStartMs = 0;   // segment start timestamp
@@ -521,8 +522,11 @@ void batteryInfo(const __FlashStringHelper* title) {
     if (calTarget > 0) { float tAh = calTarget / 3600.0; display.print(tAh, tAh < 1.0 ? 3 : 0); }
     else display.print('-');
     display.print(F("Ah"));
-    if (calStartVoltage > 0 && lastRestVoltage > 0) {
-      int ds = (int)(socFromVoltage(calStartVoltage) - socFromVoltage(lastRestVoltage));
+    {
+      int ds = 0;
+      if (calStartVoltage > 0 && lastRestVoltage > 0)
+        ds = (int)(socFromVoltage(calStartVoltage) - socFromVoltage(lastRestVoltage));
+      if (ds <= 0) ds = calLastDeltaSoc;  // show last completed if current is 0
       if (ds > 0) { display.print(F(" (")); display.print(ds); display.print(F("%)")); }
     }
 
@@ -798,6 +802,9 @@ void updateMeasurements() {
         }
       }
     }
+
+    // Save quality of completed cycle
+    calLastDeltaSoc = (int8_t)deltaSoc;
 
     // Double the target for the next step
     calTarget = calCoulombs * 2.0;
