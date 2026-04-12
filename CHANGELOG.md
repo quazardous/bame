@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.10
+
+- Added vbatMaxSeen: captures OCV after charge plateau (persistent in EEPROM)
+- Battery icon: static full/partial states based on voltage and charging detection
+- Battery icon position fixed bottom-right, calibration counter bottom-left
+- Voltage trend arrow: rounded delta for cleaner flat detection
+- Refactored: setCapacity() and resetCalibration() helpers
+- Removed unused lastRestVoltage variable
+- constrain() for hoursLeft clamping
+- 2-state charging battery icon (partial when charging, full when at max voltage)
+- Known issue: vbatMaxSeen unreliable due to LFP surface charge memory effect
+
 ## v1.9
 
 - External charge detection: voltage trend on 2-16 sample ring buffer (10s interval)

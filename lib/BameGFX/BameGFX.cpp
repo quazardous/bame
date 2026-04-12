@@ -106,18 +106,10 @@ void BameGFX::tick() {
   _frame++;
 }
 
-void BameGFX::drawChargingBattery(int16_t x, int16_t y) {
-  int16_t bw = 16, bh = 10;
-
-  // Body
-  _disp.drawRect(x, y, bw, bh, SSD1306_WHITE);
-  // Tip (+ terminal)
-  _disp.fillRect(x + bw, y + 2, 2, bh - 4, SSD1306_WHITE);
-
-  // Animated fill: 4 levels cycling
-  uint8_t level = (_frame / 3) % 5; // 0 = empty, 1-4 = levels
-  int16_t fillW = level * 3; // 0, 3, 6, 9, 12 pixels
-  if (fillW > 0) {
-    _disp.fillRect(x + 2, y + 2, fillW, bh - 4, SSD1306_WHITE);
-  }
+void BameGFX::drawChargingBattery(int16_t x, int16_t y, bool full) {
+  // Body + tip
+  _disp.drawRect(x, y, 16, 10, SSD1306_WHITE);
+  _disp.fillRect(x + 16, y + 2, 2, 6, SSD1306_WHITE);
+  // Static fill: partial (3px) when charging, full (12px) when full detected
+  _disp.fillRect(x + 2, y + 2, full ? 12 : 3, 6, SSD1306_WHITE);
 }

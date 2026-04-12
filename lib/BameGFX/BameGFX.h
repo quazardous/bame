@@ -27,8 +27,8 @@ public:
   void drawMenuItem(uint8_t row, char prefix, const __FlashStringHelper* label,
                     const char* value = nullptr, bool selected = false, bool editing = false);
 
-  // Animated charging battery icon
-  void drawChargingBattery(int16_t x, int16_t y);
+  // Charging battery icon. full=true → fully filled, full=false → partial
+  void drawChargingBattery(int16_t x, int16_t y, bool full = false);
 
   // Call in loop() to advance animations
   void tick();
