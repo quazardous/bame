@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.11
+
+- Removed vbatMaxSeen: unreliable due to LFP surface charge memory effect
+- Battery "full" icon now uses theoretical threshold (cellCount × 3.40V)
+- Freed ~300 bytes flash and 4 bytes RAM
+- EEPROM addr 37-41 freed
+
 ## v1.10
 
 - Added vbatMaxSeen: captures OCV after charge plateau (persistent in EEPROM)

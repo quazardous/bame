@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.10"
+#define BAME_VERSION "1.11"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -68,10 +68,6 @@
 // EEPROM layout for auto deep sleep
 #define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
 
-// EEPROM layout for vbatMaxSeen (true OCV after last full charge)
-#define EEPROM_VMAX_MAGIC_ADDR 37
-#define EEPROM_VMAX_ADDR       38  // 1 x float = 4 bytes (38-41)
-#define EEPROM_VMAX_MAGIC_VAL  0xEE
 
 // Cell count and dynamic voltages
 uint8_t cellCount = LFP_CELL_DEFAULT;
@@ -99,7 +95,6 @@ bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
 unsigned long restSince = 0;  // timestamp of continuous rest start (0 = not resting)
 bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
 int8_t voltageTrend = 0;             // delta rounded to 10mV: -1 down, 0 flat, +1 up
-float vbatMaxSeen = 0;              // last OCV after charge plateau (true battery Vmax)
 
 // --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -356,8 +351,6 @@ void loadCellsFromEEPROM() {
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
 void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
 
-#define saveVmaxToEEPROM() saveFloatEEPROM(EEPROM_VMAX_MAGIC_ADDR, EEPROM_VMAX_MAGIC_VAL, EEPROM_VMAX_ADDR, vbatMaxSeen)
-void loadVmaxFromEEPROM() { loadFloatEEPROM(EEPROM_VMAX_MAGIC_ADDR, EEPROM_VMAX_MAGIC_VAL, EEPROM_VMAX_ADDR, vbatMaxSeen); }
 
 // Voltage auto-calibration update
 // Conditions: at rest (|current| < threshold) AND not charging (current >= 0)
@@ -733,24 +726,11 @@ void updateMeasurements() {
       for (uint8_t i = vhistCount - half; i < vhistCount; i++)
         newSum += vhist[(startIdx + i) % VHIST_SIZE];
       float delta = newSum / half - oldSum / half;
-      bool wasCharging = externalChargeDetected;
       // Round delta to 10mV: noise below that is naturally flat
       voltageTrend = (int8_t)round(delta * 100);
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
       // voltageTrend == 0: flat → icon keeps state via hysteresis
-
-      // Vmax capture: was charging → now dropped → stable at plateau
-      static bool waitingVmax = false;
-      if (wasCharging && !externalChargeDetected) waitingVmax = true;
-      if (waitingVmax) {
-        if (externalChargeDetected) waitingVmax = false;  // charge resumed
-        else if (delta > -0.01 && voltage > cellCount * LFP_CELL_CHARGE) {
-          vbatMaxSeen = voltage;
-          saveVmaxToEEPROM();
-          waitingVmax = false;
-        }
-      }
     }
 
     if (externalChargeDetected) resetCalibration();
@@ -938,7 +918,7 @@ void updateDisplay() {
   if (externalChargeDetected) {
     if ((millis() / DISPLAY_INTERVAL_MS) % 2)
       gfx.drawChargingBattery(106, ty, false);  // partial, blinks
-  } else if (voltage >= vbatMaxSeen) {
+  } else if (voltage >= cellCount * LFP_CELL_CHARGE) {
     gfx.drawChargingBattery(106, ty, true);     // full, static
   }
 
@@ -1145,8 +1125,6 @@ void setup() {
     setCapacity(batteryCapacityNom);
   }
   loadAutoSleepFromEEPROM();
-  loadVmaxFromEEPROM();
-  if (vbatMaxSeen == 0) vbatMaxSeen = cellCount * LFP_CELL_CHARGE;  // fallback 3.40V/cell
   // calCoulombs resets to 0 on each boot (fresh segment)
 
   // Init INA226
