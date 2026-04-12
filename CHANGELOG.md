@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.9
+
+- External charge detection: voltage trend on 2-16 sample ring buffer (10s interval)
+- Hysteresis state machine: up/down arrow + blinking battery icon on rise
+- Vmax capture: when voltage stabilizes after charge plateau → persistent in EEPROM
+- Separate thresholds: 1A for charge invalidation (compressor-safe)
+- Various display improvements: Ah left / V right with trend arrow
+- At-rest display: estimated capacity in bottom-left instead of time remaining
+- Vcal saved only at end of calibration cycle (not periodic)
+- Removed Info cal menu page (flash space reclaimed)
+
 ## v1.8
 
 - Removed auto eco mode activation (manual toggle only)

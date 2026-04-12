@@ -9,7 +9,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.8"
+#define BAME_VERSION "1.9"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -38,6 +38,7 @@
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
 #define VBAT_CHARGE_CURRENT 1.0  // min current to consider real charging
+#define LFP_CELL_CHARGE     3.40 // per-cell voltage above which external charge is suspected
 #define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
 
@@ -62,10 +63,15 @@
 // EEPROM layout for auto deep sleep
 #define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
 
+// EEPROM layout for vbatMaxSeen (true OCV after last full charge)
+#define EEPROM_VMAX_MAGIC_ADDR 37
+#define EEPROM_VMAX_ADDR       38  // 1 x float = 4 bytes (38-41)
+#define EEPROM_VMAX_MAGIC_VAL  0xEE
+
 // Cell count and dynamic voltages
 uint8_t cellCount = LFP_CELL_DEFAULT;
-float vbatMax = LFP_CELL_DEFAULT * LFP_CELL_FULL;
-float vbatMin = LFP_CELL_DEFAULT * LFP_CELL_EMPTY;
+float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;
+float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY;
 float lastRestVoltage = 0;
 
 // INA226 current offset auto-zero (measured at stable rest)
@@ -79,7 +85,6 @@ float batteryCapacityAs = BATTERY_CAPACITY_AH * 3600.0;
 // Capacity calibration by exponential doubling
 float calCoulombs = 0;          // accumulated coulombs for current segment
 float calChargeSec = 0;         // seconds of sustained charging
-int8_t calLastDeltaSoc = 0;     // delta SOC% of last completed cycle
 float calTarget = 0;            // coulomb target (0 = initial time mode)
 float calStartVoltage = 0;      // rest voltage at segment start
 unsigned long calStartMs = 0;   // segment start timestamp
@@ -88,6 +93,9 @@ unsigned long calStartMs = 0;   // segment start timestamp
 
 bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
 unsigned long restSince = 0;  // timestamp of continuous rest start (0 = not resting)
+bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
+int8_t voltageTrend = 0;             // -1 falling, 0 flat, +1 rising
+float vbatMaxSeen = 0;              // last OCV after charge plateau (true battery Vmax)
 
 // --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -270,20 +278,20 @@ bool loadCalFromEEPROM() {
 // --- Voltage calibration EEPROM ---
 void saveVcalToEEPROM() {
   EEPROM.write(EEPROM_VCAL_MAGIC_ADDR, EEPROM_VCAL_MAGIC_VAL);
-  EEPROM.put(EEPROM_VCAL_ADDR, vbatMax);
-  EEPROM.put(EEPROM_VCAL_ADDR + sizeof(float), vbatMin);
+  EEPROM.put(EEPROM_VCAL_ADDR, vbatTop);
+  EEPROM.put(EEPROM_VCAL_ADDR + sizeof(float), vbatBottom);
 }
 
 bool loadVcalFromEEPROM() {
   if (EEPROM.read(EEPROM_VCAL_MAGIC_ADDR) != EEPROM_VCAL_MAGIC_VAL) return false;
-  EEPROM.get(EEPROM_VCAL_ADDR, vbatMax);
-  EEPROM.get(EEPROM_VCAL_ADDR + sizeof(float), vbatMin);
+  EEPROM.get(EEPROM_VCAL_ADDR, vbatTop);
+  EEPROM.get(EEPROM_VCAL_ADDR + sizeof(float), vbatBottom);
   // Sanity check
   float vFull = cellCount * LFP_CELL_FULL;
   float vEmpty = cellCount * LFP_CELL_EMPTY;
-  if (vbatMax < vEmpty || vbatMax > vFull * 1.4) vbatMax = vFull;
-  if (vbatMin < vEmpty * 0.5 || vbatMin > vFull) vbatMin = vEmpty;
-  if (vbatMin >= vbatMax) { vbatMax = vFull; vbatMin = vEmpty; }
+  if (vbatTop < vEmpty || vbatTop > vFull * 1.4) vbatTop = vFull;
+  if (vbatBottom < vEmpty * 0.5 || vbatBottom > vFull) vbatBottom = vEmpty;
+  if (vbatBottom >= vbatTop) { vbatTop = vFull; vbatBottom = vEmpty; }
   return true;
 }
 
@@ -335,10 +343,11 @@ void loadCellsFromEEPROM() {
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
 void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
 
+#define saveVmaxToEEPROM() saveFloatEEPROM(EEPROM_VMAX_MAGIC_ADDR, EEPROM_VMAX_MAGIC_VAL, EEPROM_VMAX_ADDR, vbatMaxSeen)
+void loadVmaxFromEEPROM() { loadFloatEEPROM(EEPROM_VMAX_MAGIC_ADDR, EEPROM_VMAX_MAGIC_VAL, EEPROM_VMAX_ADDR, vbatMaxSeen); }
+
 // Voltage auto-calibration update
 // Conditions: at rest (|current| < threshold) AND not charging (current >= 0)
-unsigned long lastVcalSave = 0;
-#define VCAL_SAVE_INTERVAL 60000  // save to EEPROM at most every 60s
 
 void updateVoltageCalibration() {
   // Ignore if charging (artificially high voltage)
@@ -347,27 +356,24 @@ void updateVoltageCalibration() {
   if (abs(current) > VBAT_REST_CURRENT) return;
   // Ignore if rest not stable yet (same 5s window as calibration)
   if (restSince == 0 || (millis() - restSince < 5000)) return;
+  // Ignore during external charge (voltage artificially high)
+  if (externalChargeDetected) return;
 
   // Convergence speed: fast if far, slow if close
   float conv;
 
   // Update Vmax
-  if (voltage > vbatMax * 0.98) {
-    conv = (voltage > vbatMax) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
-    vbatMax = vbatMax * (1.0 - conv) + voltage * conv;
+  if (voltage > vbatTop * 0.98) {
+    conv = (voltage > vbatTop) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
+    vbatTop = vbatTop * (1.0 - conv) + voltage * conv;
   }
 
   // Update Vmin
-  if (voltage < vbatMin * 1.05) {
-    conv = (voltage < vbatMin) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
-    vbatMin = vbatMin * (1.0 - conv) + voltage * conv;
+  if (voltage < vbatBottom * 1.05) {
+    conv = (voltage < vbatBottom) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
+    vbatBottom = vbatBottom * (1.0 - conv) + voltage * conv;
   }
 
-  // Periodically save to EEPROM (not every measurement)
-  if (millis() - lastVcalSave >= VCAL_SAVE_INTERVAL) {
-    saveVcalToEEPROM();
-    lastVcalSave = millis();
-  }
 }
 
 // Thresholds computed dynamically from calibrated values
@@ -486,8 +492,8 @@ const int socCurveSize = sizeof(socCurve) / sizeof(socCurve[0]);
 float socFromVoltage(float v) {
   // Convert pack voltage to per-cell, rescale to reference curve
   float vCell = v / cellCount;
-  float vMinCell = vbatMin / cellCount;
-  float vMaxCell = vbatMax / cellCount;
+  float vMinCell = vbatBottom / cellCount;
+  float vMaxCell = vbatTop / cellCount;
   float vScaled = LFP_CELL_EMPTY +
     (vCell - vMinCell) / (vMaxCell - vMinCell) *
     (LFP_CELL_FULL - LFP_CELL_EMPTY);
@@ -508,64 +514,8 @@ float socFromVoltage(float v) {
 // ===========================================
 
 // --- Battery: info page (read only) ---
-void batteryInfo(const __FlashStringHelper* title) {
-  while (true) {
-    display.clearDisplay();
-    gfx.drawTitle(title);
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-
-    // Line 1: Estimated capacity [nominal]
-    display.setCursor(0, BLUE_Y);
-    display.print(F("Cap:"));
-    display.print((int)batteryCapacityAh);
-    display.print(F("Ah ["));
-    display.print((int)batteryCapacityNom);
-    display.print(F("]"));
-
-    // Line 2: Calibration + delta%
-    display.setCursor(0, BLUE_Y + 9);
-    float calAh = calCoulombs / 3600.0;
-    display.print(calAh, calAh < 1.0 ? 3 : 1);
-    display.print(F("/"));
-    if (calTarget > 0) { float tAh = calTarget / 3600.0; display.print(tAh, tAh < 1.0 ? 3 : 0); }
-    else display.print('-');
-    display.print(F("Ah"));
-    {
-      int ds = 0;
-      if (calStartVoltage > 0 && lastRestVoltage > 0)
-        ds = (int)(socFromVoltage(calStartVoltage) - socFromVoltage(lastRestVoltage));
-      if (ds <= 0) ds = calLastDeltaSoc;  // show last completed if current is 0
-      if (ds > 0) { display.print(F(" (")); display.print(ds); display.print(F("%)")); }
-    }
-
-    // Line 3: Segment V
-    display.setCursor(0, BLUE_Y + 18);
-    if (calStartVoltage > 0) display.print(calStartVoltage, 2);
-    else display.print('-');
-    display.print(F(">"));
-    if (lastRestVoltage > 0) display.print(lastRestVoltage, 2);
-    else display.print('-');
-    display.print('V');
-
-    // Line 4: Vmax/Vmin + current offset
-    display.setCursor(0, BLUE_Y + 27);
-    display.print(vbatMax, 2);
-    display.print('/');
-    display.print(vbatMin, 2);
-    display.print('V');
-
-    display.display();
-
-    Button b = readButtonDebounced();
-    if (b == BTN_LEFT || b == BTN_CENTER) break;
-    delay(100);
-  }
-  waitButtonRelease();
-}
-
 // --- SYSTEM menu (flat) ---
-#define SYS_COUNT 5
+#define SYS_COUNT 4
 
 void settingsMenu() {
   uint8_t sel = 0;
@@ -598,13 +548,10 @@ void settingsMenu() {
       (editing == 2 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
       sel == 2, editing == 2);
 
-    // 3: Info cal
-    gfx.drawMenuItem(3, '>', F("Info cal"), NULL, sel == 3);
-
-    // 4: Reset ALL
-    gfx.drawMenuItem(4, ' ', F("Reset ALL"),
-      editing == 4 ? (tmpConfirm ? "YES" : "NO") : "",
-      sel == 4, editing == 4);
+    // 3: Reset ALL
+    gfx.drawMenuItem(3, ' ', F("Reset ALL"),
+      editing == 3 ? (tmpConfirm ? "YES" : "NO") : "",
+      sel == 3, editing == 3);
 
     display.display();
 
@@ -617,13 +564,13 @@ void settingsMenu() {
           if (editing == 0) { tmpCap += 1; if (tmpCap > 500) tmpCap = 500; }
           else if (editing == 1) { tmpCells += 1; if (tmpCells > 16) tmpCells = 16; }
           else if (editing == 2) { tmpSleep = !tmpSleep; }
-          else if (editing == 4) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
           if (editing == 0) { tmpCap -= 1; if (tmpCap < 1) tmpCap = 1; }
           else if (editing == 1) { tmpCells -= 1; if (tmpCells < 1) tmpCells = 1; }
           else if (editing == 2) { tmpSleep = !tmpSleep; }
-          else if (editing == 4) { tmpConfirm = !tmpConfirm; }
+          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_CENTER:
           if (editing == 0) {
@@ -636,13 +583,13 @@ void settingsMenu() {
             cellCount = tmpCells;
             saveCellsToEEPROM();
             // Reset voltage bounds to new cell count defaults
-            vbatMax = cellCount * LFP_CELL_FULL;
-            vbatMin = cellCount * LFP_CELL_EMPTY;
+            vbatTop = cellCount * LFP_CELL_FULL;
+            vbatBottom = cellCount * LFP_CELL_EMPTY;
             saveVcalToEEPROM();
           } else if (editing == 2) {
             autoDeepSleep = tmpSleep;
             saveAutoSleepToEEPROM();
-          } else if (editing == 4) {
+          } else if (editing == 3) {
             if (tmpConfirm) {
               for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
               // Software reboot via watchdog
@@ -666,14 +613,11 @@ void settingsMenu() {
         case BTN_UP: sel = (sel == 0) ? SYS_COUNT - 1 : sel - 1; break;
         case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
         case BTN_CENTER:
-          if (sel == 3) { waitButtonRelease(); batteryInfo(F("Info cal")); }
-          else {
-            editing = sel;
-            tmpCap = batteryCapacityNom;
-            tmpCells = cellCount;
-            tmpConfirm = false;
-            tmpSleep = autoDeepSleep;
-          }
+          editing = sel;
+          tmpCap = batteryCapacityNom;
+          tmpCells = cellCount;
+          tmpConfirm = false;
+          tmpSleep = autoDeepSleep;
           break;
         case BTN_LEFT:
           waitButtonRelease();
@@ -720,7 +664,7 @@ void updateMeasurements() {
   if (!batteryPresent) {
     socPercent = socFromVoltage(voltage);
     coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-    if (voltage >= vbatMin) {
+    if (voltage >= vbatBottom) {
       batteryPresent = true;
     }
     return;
@@ -752,23 +696,71 @@ void updateMeasurements() {
     calChargeSec = 0;
   }
 
-  // 4) Rest detection (stable for 5s before trusting voltage)
-  //    LFP cells need a few seconds after load removal for the voltage
-  //    to settle (internal resistance + diffusion). Readings taken
-  //    immediately after load removal can be 20-50mV off.
+  // 4) Voltage trend detection: dynamic buffer up to 16 samples @ 10s
+  //    Works from 2 samples (fast response), smoother as buffer fills.
+  //    Binary charging/discharging state with hysteresis (no "flat").
+  {
+    #define VHIST_SIZE 16
+    #define VHIST_INTERVAL 10000UL
+    static float vhist[VHIST_SIZE];
+    static uint8_t vhistIdx = 0;
+    static uint8_t vhistCount = 0;
+    static unsigned long vhistLastMs = 0;
+
+    if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL) {
+      vhist[vhistIdx] = voltage;
+      vhistIdx = (vhistIdx + 1) % VHIST_SIZE;
+      if (vhistCount < VHIST_SIZE) vhistCount++;
+      vhistLastMs = now;
+    }
+
+    if (vhistCount >= 2) {
+      uint8_t half = vhistCount / 2;
+      uint8_t startIdx = (vhistIdx + VHIST_SIZE - vhistCount) % VHIST_SIZE;
+      float oldSum = 0, newSum = 0;
+      for (uint8_t i = 0; i < half; i++)
+        oldSum += vhist[(startIdx + i) % VHIST_SIZE];
+      for (uint8_t i = vhistCount - half; i < vhistCount; i++)
+        newSum += vhist[(startIdx + i) % VHIST_SIZE];
+      float delta = newSum / half - oldSum / half;
+      bool wasCharging = externalChargeDetected;
+      // Hysteresis: 10mV to enter a state, flat keeps state
+      if (delta > 0.01) { externalChargeDetected = true;  voltageTrend = 1; }
+      else if (delta < -0.01) { externalChargeDetected = false; voltageTrend = -1; }
+
+      // Vmax capture: was charging → now dropped → stable at plateau
+      static bool waitingVmax = false;
+      if (wasCharging && !externalChargeDetected) waitingVmax = true;
+      if (waitingVmax) {
+        if (externalChargeDetected) waitingVmax = false;  // charge resumed
+        else if (delta > -0.01 && voltage > cellCount * LFP_CELL_CHARGE) {
+          vbatMaxSeen = voltage;
+          saveVmaxToEEPROM();
+          waitingVmax = false;
+        }
+      }
+    }
+
+    if (externalChargeDetected) {
+      calCoulombs = 0;
+      calTarget = 0;
+      calStartVoltage = 0;
+    }
+  }
+
+  // 5) Rest detection (stable for 5s before trusting voltage)
   // restSince is global (used by updateVoltageCalibration too)
   if (abs(current) < VBAT_REST_CURRENT) {
     if (restSince == 0) restSince = now;
     bool stableRest = (now - restSince >= 5000);
 
-    // SOC blend: only after 5s stable rest, gentle 5% correction
-    if (stableRest) {
+    // SOC blend + calibration: only if NOT external charging
+    if (stableRest && !externalChargeDetected) {
       float socV = socFromVoltage(voltage);
-      socPercent = socPercent * 0.92 + socV * 0.08; // 8% blend per reading at stable rest (optimized from 5%)
+      socPercent = socPercent * 0.92 + socV * 0.08;
       coulombCount = (socPercent / 100.0) * batteryCapacityAs;
       lastRestVoltage = voltage;
-      // Auto-zero current offset: at stable rest, any reading is pure offset.
-      // current = raw - offset, so raw = current + offset
+      // Auto-zero current offset
       float raw = current + currentOffset;
       currentOffset = currentOffset * 0.9 + raw * 0.1;
       // Initialize segment start if not set yet
@@ -815,7 +807,9 @@ void updateMeasurements() {
     }
 
     // Save quality of completed cycle
-    calLastDeltaSoc = (int8_t)deltaSoc;
+
+    // Save voltage calibration at end of cycle (not periodically)
+    saveVcalToEEPROM();
 
     // Double the target for the next step
     calTarget = calCoulombs * 2.0;
@@ -846,27 +840,32 @@ void updateDisplay() {
 
   // === BLUE ZONE (16-63) ===
 
-  // Line 1: Voltage + state
+  // Line 1: Remaining Ah (left) + Voltage (right)
+  int ahInt = (int)(coulombCount / 3600.0);
+  uint8_t ahDigits = (ahInt >= 100) ? 3 : (ahInt >= 10) ? 2 : 1;
+  // Size 2 pass: both big numbers
   display.setTextSize(2);
   display.setCursor(0, BLUE_Y + 2);
+  display.print(ahInt);
+  display.setCursor(SCREEN_W - 54, BLUE_Y + 2);
   display.print(voltage, 1);
+  // Voltage trend arrow (left of voltage)
+  {
+    int16_t ax = SCREEN_W - 64;
+    int16_t ay = BLUE_Y + 6;
+    if (externalChargeDetected)
+      display.fillTriangle(ax, ay + 6, ax + 4, ay, ax + 8, ay + 6, SSD1306_WHITE);
+    else if (voltageTrend < 0)
+      display.fillTriangle(ax, ay, ax + 8, ay, ax + 4, ay + 6, SSD1306_WHITE);
+  }
+  // Size 1 pass: both suffixes + line 2
   display.setTextSize(1);
+  display.setCursor(ahDigits * 12, BLUE_Y + 2);
+  display.print(F("Ah"));
+  display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
   display.print(F("V"));
 
-  // Remaining Ah, right-aligned
-  int ahInt = (int)(coulombCount / 3600.0);
-  uint8_t ahDigits = 1;
-  if (ahInt >= 10)   ahDigits = 2;
-  if (ahInt >= 100)  ahDigits = 3;
-  int16_t ahX = SCREEN_W - (ahDigits * 12 + 12);
-  display.setTextSize(2);
-  display.setCursor(ahX, BLUE_Y + 2);
-  display.print(ahInt);
-  display.setTextSize(1);
-  display.print(F("Ah"));
-
   // Line 2: Power + current
-  display.setTextSize(1);
   display.setCursor(0, BLUE_Y + 22);
   display.print((int)abs(power));
   display.print(F("W"));
@@ -905,20 +904,31 @@ void updateDisplay() {
     else             display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
 
     display.setCursor(10, ty);
-    char tbuf[6];
-    tbuf[0] = '0' + (h / 10); tbuf[1] = '0' + (h % 10);
-    tbuf[2] = ':';
-    tbuf[3] = '0' + (m / 10); tbuf[4] = '0' + (m % 10);
-    tbuf[5] = 0;
-    display.print(tbuf);
+    if (h < 10) display.print('0');
+    display.print(h);
+    display.print(':');
+    if (m < 10) display.print('0');
+    display.print(m);
 
     if (current < 0) {
       gfx.drawChargingBattery(106, ty);
     }
+  } else {
+    // At rest: show estimated total capacity (bottom left)
+    display.setCursor(0, ty);
+    display.print((int)batteryCapacityAh);
+    display.print(F("Ah"));
   }
 
-  // Bottom right: calibration counter (always visible unless charging or eco mode)
-  if (current > -VBAT_REST_CURRENT && !autoDeepSleep) {
+  // External charge: blinking battery icon
+  if (externalChargeDetected && !autoDeepSleep) {
+    if ((millis() / DISPLAY_INTERVAL_MS) % 2) {
+      gfx.drawChargingBattery(106, ty);
+    }
+  }
+
+  // Bottom right: calibration counter (hidden during charging or eco mode)
+  else if (current > -VBAT_REST_CURRENT && !autoDeepSleep) {
     bool needsRest = (calStartVoltage == 0)
       || ((calTarget > 0) ? (calCoulombs >= calTarget)
       : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
@@ -1117,15 +1127,15 @@ void setup() {
 
   // Load cell count first (affects voltage defaults)
   loadCellsFromEEPROM();
-  vbatMax = cellCount * LFP_CELL_FULL;
-  vbatMin = cellCount * LFP_CELL_EMPTY;
+  vbatTop = cellCount * LFP_CELL_FULL;
+  vbatBottom = cellCount * LFP_CELL_EMPTY;
 
   // Load voltage calibration from EEPROM
   if (loadVcalFromEEPROM()) {
     #if BAME_DEBUG
     Serial.println(F("[VCAL] EEPROM loaded"));
-    Serial.print(F("  Vmax=")); Serial.print(vbatMax, 2);
-    Serial.print(F("  Vmin=")); Serial.println(vbatMin, 2);
+    Serial.print(F("  Vmax=")); Serial.print(vbatTop, 2);
+    Serial.print(F("  Vmin=")); Serial.println(vbatBottom, 2);
     #endif
   } else {
     #if BAME_DEBUG
@@ -1141,6 +1151,7 @@ void setup() {
     batteryCapacityAs = batteryCapacityNom * 3600.0;
   }
   loadAutoSleepFromEEPROM();
+  loadVmaxFromEEPROM();
   // calCoulombs resets to 0 on each boot (fresh segment)
 
   // Init INA226
