@@ -1,16 +1,17 @@
 # BAME - Battery Monitor
 
-Firmware for a LiFePO4 12V battery monitor with automatic capacity calibration. Voltage range auto-calibrates from actual battery readings.
+A small battery monitor for the cheap, unbranded LiFePO4 packs you find in camping vans, solar setups and off-grid boxes. Those batteries don't talk — no BMS output, no datasheet, often a capacity that's generously rounded up. BAME watches the current and voltage and figures out, over time, how much energy actually fits inside.
+
+Plug it in on your 12V/24V line with an INA226 shunt and an OLED, tell it roughly how many cells are in series and the nominal Ah written on the sticker, then forget about it. As you use the battery normally, each discharge + rest cycle refines the real capacity estimate and the State of Charge stays honest.
 
 ## Features
 
-- **Auto capacity calibration** using exponential doubling: estimates converge with each discharge/rest cycle
-- **SOC estimation** from voltage lookup + coulomb counting + rest blending
-- **INA226 current auto-zero** eliminates offset drift
-- **Eco mode** (deep sleep) with adaptive wake interval
+- **Auto capacity calibration** — learns the true Ah of the pack from real usage, no lab cycle needed
+- **Honest SOC** — coulomb counting + voltage lookup + rest-based correction, works even on the flat LFP curve
+- **Tolerates real life** — compressor cycling, brief loads and partial recharges don't poison the estimate
 - **OLED display** with SOC gauge, voltage, current, power, time remaining
-- **Configurable** cell count (1-16S), nominal capacity, eco mode
-- **Calibration simulation** tool for parameter validation
+- **Eco mode** — deep sleep with adaptive wake interval for permanent install
+- **Configurable** cell count (1-16S), nominal capacity, usable voltage window
 
 ## Screenshots
 
@@ -38,25 +39,25 @@ Firmware for a LiFePO4 12V battery monitor with automatic capacity calibration. 
 
 ![Editing](docs/screenshots/menu_edit.png)
 
-### Info cal page
-
-![Info cal](docs/screenshots/info_cal.png)
-
 ## How it works
 
 ### Calibration
 
-The system measures energy consumed (coulombs) between two rest voltage readings. It starts with a 2-minute segment and doubles the target each time. Each estimate is weighted by its delta SOC — large segments have more influence. The capacity starts at the nominal value and converges continuously.
+Between two moments where the battery is truly at rest, BAME measures how many coulombs flowed and how far the SOC dropped — the ratio gives the real capacity. Segments start short (2 minutes) and double each cycle, so the estimate sharpens quickly then keeps refining. Every completed segment is weighted by its delta SOC, so long discharges count more than short ones.
 
-A segment is invalidated if sustained charging (>1A for >10s) is detected. Brief current spikes from load cycling (compressor, etc.) are tolerated.
+A segment is dropped if the battery gets recharged mid-way (>1A sustained). Brief current spikes from a fridge compressor or pump are tolerated.
+
+### Detecting "real rest"
+
+LFP cells need a quiet window to show their true voltage. BAME keeps a rolling 160-second history and only trusts a reading when the current is low **and** the voltage has stayed flat within 20 mV over that window. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
 
 ### SOC estimation
 
-At rest (current < 0.3A for 5s), the SOC blends 8% toward the voltage-based estimate. This corrects coulomb counting drift while avoiding jumps on the flat LFP voltage curve.
+When rest is confirmed, the SOC nudges toward the voltage-based estimate (8% blend). That corrects the slow drift of coulomb counting without jumping around on the flat middle of the LFP curve.
 
 ### Voltage calibration
 
-Vmin and Vmax converge toward observed rest voltages. This adapts the SOC curve to the actual battery without changing the LFP curve shape.
+The top-of-charge reference converges toward the actual observed rest voltage, so the SOC curve adapts to your specific pack without you touching anything.
 
 ## Build
 

@@ -235,92 +235,82 @@ def draw_menu_item(d, row, prefix, label, value="", selected=False, editing=Fals
         d.text(vx, y, val, inverse=inv)
 
 
-def draw_battery_icon(d, x, y):
+def draw_charging_battery(d, x, y, full=False):
+    # Mirror BameGFX::drawChargingBattery
     d.rect(x, y, 16, 10)
     d.fill_rect(x + 16, y + 2, 2, 6)
-    d.fill_rect(x + 2, y + 2, 9, 6)
+    d.fill_rect(x + 2, y + 2, 12 if full else 3, 6)
+
+
+def draw_trend_arrow(d, x, y, direction):
+    # direction: +1 up, -1 down, 0 none
+    if direction > 0:
+        d.fill_triangle(x, y + 6, x + 4, y, x + 8, y + 6)
+    elif direction < 0:
+        d.fill_triangle(x, y, x + 8, y, x + 4, y + 6)
+
+
+# --- Main display (mirrors updateDisplay() in src/main.cpp v1.11) ---
+
+def _draw_main(d, voltage, current, soc, cap_ah, trend=0, charging_ext=False, eco=False):
+    d.clear()
+    remaining_ah = int(soc * cap_ah / 100)
+
+    # Yellow: gauge with XOR %
+    draw_gauge(d, soc)
+
+    # Line 1: Ah LEFT (size 2) + "Ah", voltage RIGHT (size 2) + "V", trend arrow between
+    ah_str = str(remaining_ah)
+    d.text(0, BLUE_Y + 2, ah_str, size=2)
+    d.text(len(ah_str) * 12, BLUE_Y + 2, "Ah")
+    d.text(W - 54, BLUE_Y + 2, f"{voltage:.1f}", size=2)
+    d.text(W - 6, BLUE_Y + 2, "V")
+    draw_trend_arrow(d, W - 66, BLUE_Y + 6, trend)
+
+    # Line 2: power left, current right
+    power = int(abs(voltage * current))
+    d.text(0, BLUE_Y + 22, f"{power}W")
+    d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
+
+    # Line 3: activity status
+    ty = BLUE_Y + 37
+    active_i = 0.3  # ACTIVE_CURRENT
+    if abs(current) > active_i:
+        if current > 0:
+            hours_left = (remaining_ah) / current
+            d.fill_triangle(0, ty + 3, 6, ty, 6, ty + 6)  # discharge
+        else:
+            hours_left = (cap_ah - remaining_ah) / (-current)
+            d.fill_triangle(6, ty + 3, 0, ty, 0, ty + 6)  # charge
+        hours_left = max(0.0, min(99.9, hours_left))
+        h = int(hours_left)
+        m = int((hours_left - h) * 60)
+        d.text(10, ty, f"{h:02d}:{m:02d}")
+        # Discharge + not eco: cal counter appended after HH:MM
+        if current > 0 and not eco:
+            d.text(50, ty, "1.2Ah")
+    elif not eco:
+        # At rest: show estimated capacity left
+        d.text(0, ty, f"{int(cap_ah)}Ah")
+
+    # Bottom-right battery icon
+    if charging_ext:
+        draw_charging_battery(d, 106, ty, full=False)  # blinks in reality; drawn steady for snapshot
 
 
 # --- Screens ---
 
 def screen_main_discharge(d):
-    d.clear()
-    voltage, current, soc = 13.2, 3.7, 64
-    capacity_ah = 80
-    remaining_ah = int(soc * capacity_ah / 100)
-    power = int(voltage * current)
-    hours_left = remaining_ah / current
-
-    draw_gauge(d, soc)
-
-    # Line 1: Voltage + Ah
-    d.text(0, BLUE_Y + 2, f"{voltage:.1f}", size=2)
-    d.text(48, BLUE_Y + 10, "V")
-    ah_str = str(remaining_ah)
-    d.text(W - len(ah_str) * 12 - 12, BLUE_Y + 2, ah_str, size=2)
-    d.text(W - 12, BLUE_Y + 10, "Ah")
-
-    # Line 2: Power + Current
-    d.text(0, BLUE_Y + 22, f"{power}W")
-    d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
-
-    # Line 3: Triangle + time + cal
-    ty = BLUE_Y + 37
-    h = int(hours_left)
-    m = int((hours_left - h) * 60)
-    d.fill_triangle(0, ty + 3, 6, ty, 6, ty + 6)  # discharge triangle
-    d.text(10, ty, f"{h:02d}:{m:02d}")
-
-    # Cal counter with play triangle
-    d.fill_triangle(W - 38, ty, W - 38, ty + 6, W - 33, ty + 3)
-    d.text_right(W, ty, "1.2Ah")
+    _draw_main(d, voltage=13.2, current=3.7, soc=64, cap_ah=80, trend=-1)
 
 
 def screen_main_charge(d):
-    d.clear()
-    voltage, current, soc = 14.1, -3.0, 89
-    capacity_ah = 80
-    remaining_ah = int(soc * capacity_ah / 100)
-    power = int(voltage * abs(current))
-    remaining = (capacity_ah - remaining_ah) / abs(current)
-
-    draw_gauge(d, soc)
-
-    d.text(0, BLUE_Y + 2, f"{voltage:.1f}", size=2)
-    d.text(48, BLUE_Y + 10, "V")
-    ah_str = str(remaining_ah)
-    d.text(W - len(ah_str) * 12 - 12, BLUE_Y + 2, ah_str, size=2)
-    d.text(W - 12, BLUE_Y + 10, "Ah")
-
-    d.text(0, BLUE_Y + 22, f"{power}W")
-    d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
-
-    ty = BLUE_Y + 37
-    h = int(remaining)
-    m = int((remaining - h) * 60)
-    d.fill_triangle(6, ty + 3, 0, ty, 0, ty + 6)  # charge triangle
-    d.text(10, ty, f"{h:02d}:{m:02d}")
-    draw_battery_icon(d, 106, ty)
+    _draw_main(d, voltage=14.1, current=-3.0, soc=89, cap_ah=80,
+               trend=+1, charging_ext=True)
 
 
 def screen_main_rest(d):
-    d.clear()
-    voltage, soc = 13.2, 64
-    remaining_ah = int(soc * 80 / 100)
-
-    draw_gauge(d, soc)
-
-    d.text(0, BLUE_Y + 2, f"{voltage:.1f}", size=2)
-    d.text(48, BLUE_Y + 10, "V")
-    ah_str = str(remaining_ah)
-    d.text(W - len(ah_str) * 12 - 12, BLUE_Y + 2, ah_str, size=2)
-    d.text(W - 12, BLUE_Y + 10, "Ah")
-
-    d.text(0, BLUE_Y + 22, "0W")
-    d.text_right(W, BLUE_Y + 22, "0.0A")
-
-    # Cal counter (steady, no triangle)
-    d.text_right(W, BLUE_Y + 37, "1.2Ah")
+    _draw_main(d, voltage=13.28, current=0.0, soc=64, cap_ah=80, trend=0)
 
 
 def screen_no_battery(d):
@@ -329,34 +319,37 @@ def screen_no_battery(d):
     d.text(4, BLUE_Y + 12, "No Battery", size=2)
 
 
+# v1.11 menu: Capacity, Cells, V min, V max, Eco mode, Reset ALL, Info V (read-only, last)
+def _draw_info_row(d, row, voltage, vmin, selected=False):
+    y = BLUE_Y + row * 8
+    if selected:
+        d.fill_rect(0, y, W, 8)
+    vmin_str = f"{vmin:.2f}" if vmin > 0 else "-"
+    d.text(0, y, f"{voltage:.2f}V min:{vmin_str}", inverse=selected)
+
+
 def screen_menu(d):
     d.clear()
-    draw_title(d, "Bame v1.8")
+    draw_title(d, "Bame v1.12")
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
-    draw_menu_item(d, 2, ' ', 'Eco mode', 'OFF')
-    draw_menu_item(d, 3, '>', 'Info cal')
-    draw_menu_item(d, 4, ' ', 'Reset ALL')
+    draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
+    draw_menu_item(d, 3, ' ', 'V max', '13.6V')
+    draw_menu_item(d, 4, ' ', 'Eco mode', 'OFF')
+    draw_menu_item(d, 5, ' ', 'Reset ALL')
+    _draw_info_row(d, 6, voltage=13.28, vmin=12.81)
 
 
 def screen_menu_edit(d):
     d.clear()
-    draw_title(d, "Bame v1.8")
+    draw_title(d, "Bame v1.12")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
-    draw_menu_item(d, 2, ' ', 'Eco mode', 'OFF')
-    draw_menu_item(d, 3, '>', 'Info cal')
-    draw_menu_item(d, 4, ' ', 'Reset ALL')
-
-
-def screen_info_cal(d):
-    d.clear()
-    draw_title(d, "Info cal")
-    y = BLUE_Y
-    d.text(0, y, "Cap:82Ah [80]")
-    d.text(0, y + 9, "1.2/2.4Ah (8%)")
-    d.text(0, y + 18, "13.28>13.21V")
-    d.text(0, y + 27, "14.58/10.02V")
+    draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
+    draw_menu_item(d, 3, ' ', 'V max', '13.6V')
+    draw_menu_item(d, 4, ' ', 'Eco mode', 'OFF')
+    draw_menu_item(d, 5, ' ', 'Reset ALL')
+    _draw_info_row(d, 6, voltage=13.28, vmin=12.81)
 
 
 SCREENS = {
@@ -366,7 +359,6 @@ SCREENS = {
     'no_battery': screen_no_battery,
     'menu': screen_menu,
     'menu_edit': screen_menu_edit,
-    'info_cal': screen_info_cal,
 }
 
 

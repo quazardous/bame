@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.12
+
+- Voltage trend: linear regression over the full 16-sample buffer (slope in V/10s) replaces the split-average approximation
+- Rest detection: stability gate (bufMax - bufMin < 20mV over 160s) replaces the 5s restSince timer
+- Removed redundant vMinObserved, restSince, updateVoltageCalibration() — unified into the single stableRest pathway
+- vbatTop slow-convergence inlined into the rest block
+- Info line + V min menu label now read from bufMin (buffer-derived)
+- Sim cleanup: removed the SVG-based renderer (oled_svg, bamegfx, render_screen, screens/); kept the standalone PNG emulator and updated it to v1.12 layout
+- Stale screenshots removed from docs/screenshots
+- README rewritten as a plain-language intro for camping-van / off-grid use
+- Added ROADMAP.md (full-cycle coulomb counter, split Vmin tracking)
+- Removed old isp_programmer/ subtree
+
 ## v1.11
 
 - Removed vbatMaxSeen: unreliable due to LFP surface charge memory effect

@@ -1,19 +1,25 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
-#include <avr/sleep.h>
-#include <avr/power.h>
 #include <avr/wdt.h>
+#if !BAME_DEV
+  #include <avr/sleep.h>
+  #include <avr/power.h>
+#endif
 #include <Adafruit_SSD1306.h>
 #include <INA226.h>
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.11"
+#define BAME_VERSION "1.12"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
 #endif
+#ifndef BAME_DEV
+  #define BAME_DEV 0
+#endif
+// BAME_DEV=1 → dev build (nano): no sleep, no V min/max menu (flash-constrained)
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -42,8 +48,10 @@
 #define MIN_BATTERY_V      1.0    // min voltage to consider battery present
 #define CAPACITY_MIN       1.0    // Ah sanity bounds
 #define CAPACITY_MAX       500.0
-#define REST_STABLE_MS     5000UL // stable rest duration before voltage trusted
-#define LFP_CELL_CHARGE     3.40 // per-cell voltage above which external charge is suspected
+#define LFP_CELL_CHARGE     3.40  // per-cell voltage above which external charge is suspected
+#define LFP_CELL_CHARGE_MIN 3.375 // below this, a charger cannot be active
+#define LFP_CELL_VMIN_UTILE 3.00  // default user practical min per cell
+#define LFP_CELL_VMAX_UTILE 3.40  // default user practical max per cell (rest OCV at 100%)
 #define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
 
@@ -71,8 +79,18 @@
 
 // Cell count and dynamic voltages
 uint8_t cellCount = LFP_CELL_DEFAULT;
-float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;
-float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY;
+float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;    // calibration window upper bound
+float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY; // calibration window lower bound
+
+// User practical operating range (set via menu, or hardcoded in dev build)
+#ifndef BAME_VMIN_UTILE
+  #define BAME_VMIN_UTILE (LFP_CELL_DEFAULT * LFP_CELL_VMIN_UTILE)
+#endif
+#ifndef BAME_VMAX_UTILE
+  #define BAME_VMAX_UTILE (LFP_CELL_DEFAULT * LFP_CELL_VMAX_UTILE)
+#endif
+float vMinUtile = BAME_VMIN_UTILE;
+float vMaxUtile = BAME_VMAX_UTILE;
 
 // INA226 current offset auto-zero (measured at stable rest)
 float currentOffset = 0;
@@ -91,10 +109,16 @@ unsigned long calStartMs = 0;   // segment start timestamp
 #define CAL_INITIAL_TIME_MS  120000  // 2 min for first step (longer = bigger delta SOC = better first estimate)
 #define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
 
+#if !BAME_DEV
 bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
-unsigned long restSince = 0;  // timestamp of continuous rest start (0 = not resting)
+#else
+#define autoDeepSleep false
+#endif
 bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
-int8_t voltageTrend = 0;             // delta rounded to 10mV: -1 down, 0 flat, +1 up
+int8_t voltageTrend = 0;             // slope sign: -1 down, 0 flat, +1 up
+float bufMin = 0;                    // min voltage over sample buffer (0 until full)
+float bufMax = 0;                    // max voltage over sample buffer
+float stability = 0;                 // bufMax - bufMin (rest proxy)
 
 // --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -121,46 +145,40 @@ enum Button { BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_CENTER };
 // Forward declarations
 void waitButtonRelease();
 Button readButton();
-void updateVoltageCalibration();
 float socFromVoltage(float v);
 void settingsMenu();
 void batteryMenu();
 
-// Sleep
 #define MENU_PRESS_MS      500  // long press -> system menu
+#if !BAME_DEV
+// Sleep
 #define DEEPSLEEP_PRESS_MS 3000 // longer press -> deep sleep
 #define AUTO_SLEEP_MS    60000   // 60s no interaction -> screen sleep
 #define AUTO_DEEPSLEEP_MS 300000 // 5min no interaction -> deep sleep
 bool oledSleeping = false;
+#else
+#define oledSleeping false
+#endif
 unsigned long lastInteraction = 0;
 
+#if !BAME_DEV
 // ISR for deep sleep wake-up (INT0 on D2)
 volatile bool wakeUpFlag = false;
-void wakeUpISR() {
-  wakeUpFlag = true;
-}
+void wakeUpISR() { wakeUpFlag = true; }
 
 void enterOledSleep() {
   oledSleeping = true;
   display.ssd1306_command(SSD1306_DISPLAYOFF);
-  #if BAME_DEBUG
-  Serial.println(F("[SLEEP] OLED off"));
-  #endif
 }
 
 void exitOledSleep() {
   oledSleeping = false;
   display.ssd1306_command(SSD1306_DISPLAYON);
-  #if BAME_DEBUG
-  Serial.println(F("[SLEEP] OLED on"));
-  #endif
 }
 
 // Watchdog ISR for periodic wake-up
 volatile bool wdtWakeUp = false;
-ISR(WDT_vect) {
-  wdtWakeUp = true;
-}
+ISR(WDT_vect) { wdtWakeUp = true; }
 
 void enterDeepSleep() {
   #if BAME_DEBUG
@@ -208,7 +226,6 @@ void enterDeepSleep() {
           ina.getCurrent();
           voltage = ina.getBusVoltage();
           current = ina.getCurrent();
-          updateVoltageCalibration();
 
           // Adapt interval based on voltage variation
           float deltaV = abs(voltage - prevVoltage);
@@ -246,6 +263,7 @@ void enterDeepSleep() {
   #endif
   waitButtonRelease();
 }
+#endif // !BAME_DEV
 
 // EEPROM layout for keypad calibration
 #define EEPROM_MAGIC_ADDR 0        // 1 byte: 0xCA = calibrated
@@ -348,39 +366,11 @@ void loadCellsFromEEPROM() {
   if (v >= 1 && v <= 16) cellCount = v;
 }
 
+#if !BAME_DEV
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
 void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
+#endif
 
-
-// Voltage auto-calibration update
-// Conditions: at rest (|current| < threshold) AND not charging (current >= 0)
-
-void updateVoltageCalibration() {
-  // Ignore if charging (artificially high voltage)
-  if (current < -VBAT_REST_CURRENT) return;
-  // Ignore if not at rest
-  if (abs(current) > VBAT_REST_CURRENT) return;
-  // Ignore if rest not stable yet (same 5s window as calibration)
-  if (restSince == 0 || (millis() - restSince < REST_STABLE_MS)) return;
-  // Ignore during external charge (voltage artificially high)
-  if (externalChargeDetected) return;
-
-  // Convergence speed: fast if far, slow if close
-  float conv;
-
-  // Update Vmax
-  if (voltage > vbatTop * 0.98) {
-    conv = (voltage > vbatTop) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
-    vbatTop = vbatTop * (1.0 - conv) + voltage * conv;
-  }
-
-  // Update Vmin
-  if (voltage < vbatBottom * 1.05) {
-    conv = (voltage < vbatBottom) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
-    vbatBottom = vbatBottom * (1.0 - conv) + voltage * conv;
-  }
-
-}
 
 // Thresholds computed dynamically from calibrated values
 // Each button has its own tolerance = distance to nearest neighbor / 2
@@ -449,16 +439,14 @@ void checkLongPress() {
   unsigned long pressStart = millis();
   while (readButton() == BTN_CENTER) {
     unsigned long held = millis() - pressStart;
-
+#if !BAME_DEV
     if (held >= MENU_PRESS_MS) {
-      // Tier 2 gauge: filling toward deep sleep
       display.clearDisplay();
       float pct = (float)(held - MENU_PRESS_MS) * 100.0f / (DEEPSLEEP_PRESS_MS - MENU_PRESS_MS);
       if (pct > 100.0f) pct = 100.0f;
       gfx.drawGauge(pct, F("SLEEP"));
       display.display();
     }
-
     if (held >= DEEPSLEEP_PRESS_MS) {
       waitButtonRelease();
       enterDeepSleep();
@@ -466,13 +454,11 @@ void checkLongPress() {
       lastInteraction = millis();
       return;
     }
-
+#endif
     delay(50);
   }
-
-  // Released — check which tier was reached
-  unsigned long held = millis() - pressStart;
-  if (held >= MENU_PRESS_MS) {
+  // Released — open menu if held past tier 1
+  if (millis() - pressStart >= MENU_PRESS_MS) {
     waitButtonRelease();
     settingsMenu();
     lastInteraction = millis();
@@ -519,9 +505,19 @@ float socFromVoltage(float v) {
 // Diagnostics
 // ===========================================
 
-// --- Battery: info page (read only) ---
 // --- SYSTEM menu (flat) ---
-#define SYS_COUNT 4
+enum MenuItem {
+  ITEM_CAP,
+  ITEM_CELLS,
+#if !BAME_DEV
+  ITEM_VMIN,
+  ITEM_VMAX,
+  ITEM_ECO,
+#endif
+  ITEM_RESET,
+  ITEM_INFO_V,    // read-only: current voltage + min observed
+  SYS_COUNT
+};
 
 void settingsMenu() {
   uint8_t sel = 0;
@@ -529,35 +525,77 @@ void settingsMenu() {
 
   float tmpCap = batteryCapacityNom;
   uint8_t tmpCells = cellCount;
+#if !BAME_DEV
+  float tmpVmin = vMinUtile;
+  float tmpVmax = vMaxUtile;
+#endif
   bool tmpConfirm = false;
+#if !BAME_DEV
   bool tmpSleep = autoDeepSleep;
+#endif
 
   while (true) {
     display.clearDisplay();
     gfx.drawTitle(F("Bame v" BAME_VERSION));
 
+    // Info row (display only): current voltage + min observed
+    {
+      uint8_t y = BLUE_Y + ITEM_INFO_V * 8;
+      display.setTextSize(1);
+      if (sel == ITEM_INFO_V) {
+        display.fillRect(0, y, SCREEN_W, 8, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+      } else {
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+      }
+      display.setCursor(0, y);
+      display.print(voltage, 2);
+      display.print(F("V min:"));
+      if (bufMin > 0) display.print(bufMin, 2);
+      else display.print('-');
+      display.setTextColor(SSD1306_WHITE);
+    }
+
     char buf[10];
 
-    // 0: Capacity
-    int capVal = (int)(editing == 0 ? tmpCap : batteryCapacityNom);
+    // Capacity
+    int capVal = (int)(editing == ITEM_CAP ? tmpCap : batteryCapacityNom);
     itoa(capVal, buf, 10);
     strcat(buf, "Ah");
-    gfx.drawMenuItem(0, ' ', F("Capacity"), buf, sel == 0, editing == 0);
+    gfx.drawMenuItem(ITEM_CAP, ' ', F("Capacity"), buf, sel == ITEM_CAP, editing == ITEM_CAP);
 
-    // 1: Cells
-    itoa(editing == 1 ? tmpCells : cellCount, buf, 10);
+    // Cells
+    itoa(editing == ITEM_CELLS ? tmpCells : cellCount, buf, 10);
     strcat(buf, "S");
-    gfx.drawMenuItem(1, ' ', F("Cells"), buf, sel == 1, editing == 1);
+    gfx.drawMenuItem(ITEM_CELLS, ' ', F("Cells"), buf, sel == ITEM_CELLS, editing == ITEM_CELLS);
 
-    // 2: Eco mode
-    gfx.drawMenuItem(2, ' ', F("Eco mode"),
-      (editing == 2 ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
-      sel == 2, editing == 2);
+#if !BAME_DEV
+    // V min utile (with observed min appended)
+    dtostrf(editing == ITEM_VMIN ? tmpVmin : vMinUtile, 0, 1, buf);
+    {
+      char *p = buf + strlen(buf);
+      *p++ = 'V';
+      if (editing != ITEM_VMIN && bufMin > 0) {
+        *p++ = '/';
+        dtostrf(bufMin, 0, 1, p);
+      } else *p = 0;
+    }
+    gfx.drawMenuItem(ITEM_VMIN, ' ', F("V min"), buf, sel == ITEM_VMIN, editing == ITEM_VMIN);
 
-    // 3: Reset ALL
-    gfx.drawMenuItem(3, ' ', F("Reset ALL"),
-      editing == 3 ? (tmpConfirm ? "YES" : "NO") : "",
-      sel == 3, editing == 3);
+    // V max utile
+    dtostrf(editing == ITEM_VMAX ? tmpVmax : vMaxUtile, 0, 1, buf);
+    strcat(buf, "V");
+    gfx.drawMenuItem(ITEM_VMAX, ' ', F("V max"), buf, sel == ITEM_VMAX, editing == ITEM_VMAX);
+    // Eco mode
+    gfx.drawMenuItem(ITEM_ECO, ' ', F("Eco mode"),
+      (editing == ITEM_ECO ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
+      sel == ITEM_ECO, editing == ITEM_ECO);
+#endif
+
+    // Reset ALL
+    gfx.drawMenuItem(ITEM_RESET, ' ', F("Reset ALL"),
+      editing == ITEM_RESET ? (tmpConfirm ? "YES" : "NO") : "",
+      sel == ITEM_RESET, editing == ITEM_RESET);
 
     display.display();
 
@@ -567,37 +605,60 @@ void settingsMenu() {
     if (editing >= 0) {
       switch (b) {
         case BTN_UP:
-          if (editing == 0) { tmpCap += 1; if (tmpCap > 500) tmpCap = 500; }
-          else if (editing == 1) { tmpCells += 1; if (tmpCells > 16) tmpCells = 16; }
-          else if (editing == 2) { tmpSleep = !tmpSleep; }
-          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
+          if (editing == ITEM_CAP) { tmpCap += 1; if (tmpCap > CAPACITY_MAX) tmpCap = CAPACITY_MAX; }
+          else if (editing == ITEM_CELLS) { tmpCells += 1; if (tmpCells > 16) tmpCells = 16; }
+#if !BAME_DEV
+          else if (editing == ITEM_VMIN) { tmpVmin += 0.05; if (tmpVmin > cellCount * LFP_CELL_CHARGE) tmpVmin = cellCount * LFP_CELL_CHARGE; }
+          else if (editing == ITEM_VMAX) { tmpVmax += 0.05; if (tmpVmax > cellCount * LFP_CELL_FULL) tmpVmax = cellCount * LFP_CELL_FULL; }
+#endif
+#if !BAME_DEV
+          else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
+#endif
+          else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
-          if (editing == 0) { tmpCap -= 1; if (tmpCap < 1) tmpCap = 1; }
-          else if (editing == 1) { tmpCells -= 1; if (tmpCells < 1) tmpCells = 1; }
-          else if (editing == 2) { tmpSleep = !tmpSleep; }
-          else if (editing == 3) { tmpConfirm = !tmpConfirm; }
+          if (editing == ITEM_CAP) { tmpCap -= 1; if (tmpCap < CAPACITY_MIN) tmpCap = CAPACITY_MIN; }
+          else if (editing == ITEM_CELLS) { tmpCells -= 1; if (tmpCells < 1) tmpCells = 1; }
+#if !BAME_DEV
+          else if (editing == ITEM_VMIN) { tmpVmin -= 0.05; if (tmpVmin < cellCount * LFP_CELL_EMPTY) tmpVmin = cellCount * LFP_CELL_EMPTY; }
+          else if (editing == ITEM_VMAX) { tmpVmax -= 0.05; if (tmpVmax < cellCount * LFP_CELL_CHARGE) tmpVmax = cellCount * LFP_CELL_CHARGE; }
+#endif
+#if !BAME_DEV
+          else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
+#endif
+          else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_CENTER:
-          if (editing == 0) {
+          if (editing == ITEM_CAP) {
             batteryCapacityNom = tmpCap;
             saveNomToEEPROM();
             setCapacity(batteryCapacityNom);
             saveCapToEEPROM();
-          } else if (editing == 1) {
+          } else if (editing == ITEM_CELLS) {
             cellCount = tmpCells;
             saveCellsToEEPROM();
-            // Reset voltage bounds to new cell count defaults
             vbatTop = cellCount * LFP_CELL_FULL;
             vbatBottom = cellCount * LFP_CELL_EMPTY;
             saveVcalToEEPROM();
-          } else if (editing == 2) {
+          }
+#if !BAME_DEV
+          else if (editing == ITEM_VMIN) {
+            vMinUtile = tmpVmin;
+            // TODO: saveVutileToEEPROM();
+          } else if (editing == ITEM_VMAX) {
+            vMaxUtile = tmpVmax;
+            // TODO: saveVutileToEEPROM();
+          }
+#endif
+#if !BAME_DEV
+          else if (editing == ITEM_ECO) {
             autoDeepSleep = tmpSleep;
             saveAutoSleepToEEPROM();
-          } else if (editing == 3) {
+          }
+#endif
+          else if (editing == ITEM_RESET) {
             if (tmpConfirm) {
               for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
-              // Software reboot via watchdog
               wdt_enable(WDTO_15MS);
               while (true);
             }
@@ -607,8 +668,12 @@ void settingsMenu() {
         case BTN_LEFT:
           tmpCap = batteryCapacityNom;
           tmpCells = cellCount;
-          tmpConfirm = false;
+#if !BAME_DEV
+          tmpVmin = vMinUtile;
+          tmpVmax = vMaxUtile;
           tmpSleep = autoDeepSleep;
+#endif
+          tmpConfirm = false;
           editing = -1;
           break;
         default: break;
@@ -618,11 +683,16 @@ void settingsMenu() {
         case BTN_UP: sel = (sel == 0) ? SYS_COUNT - 1 : sel - 1; break;
         case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
         case BTN_CENTER:
+          if (sel == ITEM_INFO_V) break;  // info item: no action
           editing = sel;
           tmpCap = batteryCapacityNom;
           tmpCells = cellCount;
-          tmpConfirm = false;
+#if !BAME_DEV
+          tmpVmin = vMinUtile;
+          tmpVmax = vMaxUtile;
           tmpSleep = autoDeepSleep;
+#endif
+          tmpConfirm = false;
           break;
         case BTN_LEFT:
           waitButtonRelease();
@@ -699,12 +769,12 @@ void updateMeasurements() {
     calChargeSec = 0;
   }
 
-  // 4) Voltage trend detection: dynamic buffer up to 16 samples @ 10s
-  //    Works from 2 samples (fast response), smoother as buffer fills.
-  //    Binary charging/discharging state with hysteresis (no "flat").
+  // 4) Voltage buffer analysis: linear regression slope + variance
+  //    Stats computed only once the 16-sample (160s) buffer is full.
+  //    slope → trend; bufMax-bufMin → stability (rest proxy).
+  #define VHIST_SIZE 16
+  #define VHIST_INTERVAL 10000UL
   {
-    #define VHIST_SIZE 16
-    #define VHIST_INTERVAL 10000UL
     static float vhist[VHIST_SIZE];
     static uint8_t vhistIdx = 0;
     static uint8_t vhistCount = 0;
@@ -717,52 +787,55 @@ void updateMeasurements() {
       vhistLastMs = now;
     }
 
-    if (vhistCount >= 2) {
-      uint8_t half = vhistCount / 2;
-      uint8_t startIdx = (vhistIdx + VHIST_SIZE - vhistCount) % VHIST_SIZE;
-      float oldSum = 0, newSum = 0;
-      for (uint8_t i = 0; i < half; i++)
-        oldSum += vhist[(startIdx + i) % VHIST_SIZE];
-      for (uint8_t i = vhistCount - half; i < vhistCount; i++)
-        newSum += vhist[(startIdx + i) % VHIST_SIZE];
-      float delta = newSum / half - oldSum / half;
-      // Round delta to 10mV: noise below that is naturally flat
-      voltageTrend = (int8_t)round(delta * 100);
+    if (vhistCount == VHIST_SIZE) {
+      uint8_t startIdx = vhistIdx; // oldest sample (buffer full)
+      float sumY = 0, sumIY = 0;
+      bufMin = bufMax = vhist[startIdx];
+      for (uint8_t i = 0; i < VHIST_SIZE; i++) {
+        float v = vhist[(startIdx + i) % VHIST_SIZE];
+        sumY  += v;
+        sumIY += (float)i * v;
+        if (v < bufMin) bufMin = v;
+        if (v > bufMax) bufMax = v;
+      }
+      // slope in V per 10s step. Sx=sum(0..15)=120, D=N*sum(i^2)-Sx^2=5440
+      float slope = (VHIST_SIZE * sumIY - 120.0f * sumY) / 5440.0f;
+      stability = bufMax - bufMin;
+      voltageTrend = (slope > 0.010f) ? 1 : (slope < -0.010f) ? -1 : 0;
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
-      // voltageTrend == 0: flat → icon keeps state via hysteresis
     }
+    // Below 3.375V/cell a charger cannot be active (it imposes higher voltage)
+    if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;
 
     if (externalChargeDetected) resetCalibration();
   }
 
-  // 5) Rest detection (stable for 5s before trusting voltage)
-  // restSince is global (used by updateVoltageCalibration too)
-  if (abs(current) < VBAT_REST_CURRENT) {
-    if (restSince == 0) restSince = now;
-    bool stableRest = (now - restSince >= REST_STABLE_MS);
+  // 5) Rest detection: stability gate (buffer spread < 20mV) replaces 5s timer.
+  bool stableRest = (abs(current) < VBAT_REST_CURRENT)
+                 && (bufMin > 0)
+                 && (stability < 0.020f);
 
-    // SOC blend + calibration: only if NOT external charging
-    if (stableRest && !externalChargeDetected) {
-      float socV = socFromVoltage(voltage);
-      socPercent = socPercent * 0.92 + socV * 0.08;
-      coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-      // Auto-zero current offset
-      float raw = current + currentOffset;
-      currentOffset = currentOffset * 0.9 + raw * 0.1;
-      // Initialize segment start if not set yet
-      if (calStartVoltage == 0) {
-        calStartVoltage = voltage;
-        calStartMs = now;
-      }
+  if (stableRest && !externalChargeDetected) {
+    float socV = socFromVoltage(voltage);
+    socPercent = socPercent * 0.92 + socV * 0.08;
+    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
+    // Auto-zero current offset
+    float raw = current + currentOffset;
+    currentOffset = currentOffset * 0.9 + raw * 0.1;
+    // Initialize segment start if not set yet
+    if (calStartVoltage == 0) {
+      calStartVoltage = voltage;
+      calStartMs = now;
     }
-  } else {
-    restSince = 0;
+    // Slow Vmax convergence toward observed rest voltage
+    if (current >= -VBAT_REST_CURRENT && voltage > vbatTop * 0.98f) {
+      float conv = (voltage > vbatTop) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
+      vbatTop = vbatTop * (1.0f - conv) + voltage * conv;
+    }
   }
 
-  // 5) Calibration save: target reached AND 5s stable rest AND valid segment
-  //    Both start and end voltages must be taken under the same 5s rest
-  //    condition to ensure symmetric accuracy.
+  // 5) Calibration save: target reached AND buffer-stable rest AND valid segment
   bool calTargetReached;
   if (calTarget <= 0) {
     // Initial time mode: 1 min AND minimum coulombs
@@ -774,8 +847,7 @@ void updateMeasurements() {
   }
 
   if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0
-      && abs(current) < VBAT_REST_CURRENT && restSince > 0
-      && (now - restSince >= REST_STABLE_MS)) {
+      && stableRest) {
     float vEnd = voltage;
     float socStart = socFromVoltage(calStartVoltage);
     float socEnd = socFromVoltage(vEnd);
@@ -804,8 +876,6 @@ void updateMeasurements() {
     calStartMs = now;
     calCoulombs = 0;
   }
-
-  updateVoltageCalibration();
 }
 
 void updateDisplay() {
@@ -1124,7 +1194,9 @@ void setup() {
     // No calibration -> fallback to nominal
     setCapacity(batteryCapacityNom);
   }
+#if !BAME_DEV
   loadAutoSleepFromEEPROM();
+#endif
   // calCoulombs resets to 0 on each boot (fresh segment)
 
   // Init INA226
@@ -1162,26 +1234,30 @@ void loop() {
   // Button handling
   Button b = readButton();
   if (b != BTN_NONE) {
+#if !BAME_DEV
     if (oledSleeping) {
       waitButtonRelease();
       exitOledSleep();
-    } else if (b == BTN_CENTER) {
+    } else
+#endif
+    if (b == BTN_CENTER) {
       checkLongPress();
     }
     lastInteraction = millis();
   }
 
+#if !BAME_DEV
   // Screen auto-sleep after 60s
   if (!oledSleeping && (millis() - lastInteraction >= AUTO_SLEEP_MS)) {
     enterOledSleep();
   }
-
   // Auto deep sleep after 5min
   if (autoDeepSleep && (millis() - lastInteraction >= AUTO_DEEPSLEEP_MS)) {
     enterDeepSleep();
     lastMeasure = millis();
     lastInteraction = millis();
   }
+#endif
 
   if (now - lastMeasure >= MEASURE_INTERVAL_MS) {
     updateMeasurements();
