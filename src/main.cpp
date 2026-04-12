@@ -38,6 +38,11 @@
 // Detection thresholds
 #define VBAT_REST_CURRENT  0.3    // max current to consider at rest
 #define VBAT_CHARGE_CURRENT 1.0  // min current to consider real charging
+#define ACTIVE_CURRENT     0.5    // min |current| to show discharge/charge indicators
+#define MIN_BATTERY_V      1.0    // min voltage to consider battery present
+#define CAPACITY_MIN       1.0    // Ah sanity bounds
+#define CAPACITY_MAX       500.0
+#define REST_STABLE_MS     5000UL // stable rest duration before voltage trusted
 #define LFP_CELL_CHARGE     3.40 // per-cell voltage above which external charge is suspected
 #define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
@@ -321,7 +326,7 @@ bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, floa
 #define saveCapToEEPROM() saveFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)
 bool loadCapFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
-  if (batteryCapacityAh < 1.0 || batteryCapacityAh > 500.0) batteryCapacityAh = batteryCapacityNom;
+  if (batteryCapacityAh < CAPACITY_MIN || batteryCapacityAh > CAPACITY_MAX) batteryCapacityAh = batteryCapacityNom;
   batteryCapacityAs = batteryCapacityAh * 3600.0;
   return true;
 }
@@ -331,7 +336,7 @@ bool loadCapFromEEPROM() {
 #define saveNomToEEPROM() saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)
 bool loadNomFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)) return false;
-  if (batteryCapacityNom < 1.0 || batteryCapacityNom > 500.0) batteryCapacityNom = BATTERY_CAPACITY_AH;
+  if (batteryCapacityNom < CAPACITY_MIN || batteryCapacityNom > CAPACITY_MAX) batteryCapacityNom = BATTERY_CAPACITY_AH;
   return true;
 }
 
@@ -363,7 +368,7 @@ void updateVoltageCalibration() {
   // Ignore if not at rest
   if (abs(current) > VBAT_REST_CURRENT) return;
   // Ignore if rest not stable yet (same 5s window as calibration)
-  if (restSince == 0 || (millis() - restSince < 5000)) return;
+  if (restSince == 0 || (millis() - restSince < REST_STABLE_MS)) return;
   // Ignore during external charge (voltage artificially high)
   if (externalChargeDetected) return;
 
@@ -660,7 +665,7 @@ void updateMeasurements() {
 
   // No battery
   static bool batteryPresent = false;
-  if (voltage < 1.0) {
+  if (voltage < MIN_BATTERY_V) {
     batteryPresent = false;
     socPercent = 0;
     coulombCount = 0;
@@ -755,7 +760,7 @@ void updateMeasurements() {
   // restSince is global (used by updateVoltageCalibration too)
   if (abs(current) < VBAT_REST_CURRENT) {
     if (restSince == 0) restSince = now;
-    bool stableRest = (now - restSince >= 5000);
+    bool stableRest = (now - restSince >= REST_STABLE_MS);
 
     // SOC blend + calibration: only if NOT external charging
     if (stableRest && !externalChargeDetected) {
@@ -790,7 +795,7 @@ void updateMeasurements() {
 
   if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0
       && abs(current) < VBAT_REST_CURRENT && restSince > 0
-      && (now - restSince >= 5000)) {
+      && (now - restSince >= REST_STABLE_MS)) {
     float vEnd = voltage;
     float socStart = socFromVoltage(calStartVoltage);
     float socEnd = socFromVoltage(vEnd);
@@ -799,7 +804,7 @@ void updateMeasurements() {
     // Estimate capacity if delta SOC is meaningful
     if (deltaSoc > 5.0) {
       float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
-      if (estAh > 1.0 && estAh < 500.0) {
+      if (estAh > CAPACITY_MIN && estAh < CAPACITY_MAX) {
         // Unified weighted convergence: weight proportional to delta SOC
         float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
         setCapacity(batteryCapacityAh * (1.0 - weight) + estAh * weight);
@@ -827,7 +832,7 @@ void updateDisplay() {
   display.clearDisplay();
 
   // No battery detected
-  if (voltage < 1.0) {
+  if (voltage < MIN_BATTERY_V) {
     gfx.drawGauge(0);
     display.setTextSize(2);
     display.setCursor(4, BLUE_Y + 12);
@@ -886,16 +891,16 @@ void updateDisplay() {
   // Line 3: Arrow + time remaining
   int16_t ty = BLUE_Y + 37;
   float hoursLeft = 0;
-  if (current > 0.5) {
+  if (current > ACTIVE_CURRENT) {
     hoursLeft = (coulombCount / 3600.0) / current;
-  } else if (current < -0.5) {
+  } else if (current < -ACTIVE_CURRENT) {
     float remaining = (batteryCapacityAs - coulombCount) / 3600.0;
     if (remaining < 0) remaining = 0;
     hoursLeft = remaining / (-current);
   }
 
   // Bottom left line: either HH:MM (active current) or capacity (at rest)
-  if (abs(current) > 0.5) {
+  if (abs(current) > ACTIVE_CURRENT) {
     hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
     int h = (int)hoursLeft;
     int m = (int)((hoursLeft - h) * 60);
@@ -953,7 +958,7 @@ void debugSerial() {
   Serial.print(coulombCount, 0);
   Serial.print(F("/"));
   Serial.print(batteryCapacityAs, 0);
-  if (current > 0.5) {
+  if (current > ACTIVE_CURRENT) {
     float hoursLeft = (coulombCount / 3600.0) / current;
     Serial.print(F(" | Left: "));
     Serial.print(hoursLeft, 1);
