@@ -68,7 +68,7 @@ void bame_declare_full(bame_state_t* s, uint32_t now_ms) {
 // BMS cutoff handler — Ah delivered since last full event = measured capacity.
 // Blends into learned capacity (30% toward new sample).
 static void handle_cutoff(bame_state_t* s, const bame_config_t* cfg) {
-    if (s->since_last_full_ms == 0u) return;  // never had a full reference
+    if (s->coulombs_at_last_full <= 0.0f) return;  // never had a full reference
     float delivered_c = s->coulombs_at_last_full - s->coulomb_count;
     if (delivered_c <= 0.0f) return;
     float delivered_ah = delivered_c / 3600.0f;
@@ -79,8 +79,8 @@ static void handle_cutoff(bame_state_t* s, const bame_config_t* cfg) {
     } else {
         s->capacity_ah = s->capacity_ah * 0.70f + delivered_ah * 0.30f;
     }
-    s->coulomb_count       = 0.0f;
-    s->since_last_full_ms  = 0u;
+    s->coulomb_count         = 0.0f;
+    s->coulombs_at_last_full = 0.0f;  // marker: no reference until next full event
 }
 
 
