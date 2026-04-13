@@ -1,4 +1,4 @@
-# BAME - Battery Monitor
+# BaMe - Battery Meter
 
 A small battery monitor for the cheap, unbranded LiFePO4 packs you find in camping vans, solar setups and off-grid boxes. Those batteries don't talk — no BMS output, no datasheet, often a capacity that's generously rounded up. BAME watches the current and voltage and figures out, over time, how much energy actually fits inside.
 
