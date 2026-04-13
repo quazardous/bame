@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.16
+
+- Fixed current display frozen near 0 A during glaciere pulls. Root cause: once `coulombRaw` was introduced (v1.15), `stableRest` no longer flickered off during load, so in the 10 s lag between a fresh load and the next buffer push, the currentOffset auto-zero had time to converge toward the ongoing load current — `readCurrent = ina - currentOffset` then collapsed to near 0. Display was stuck at ±0.2 A instead of 3-4 A.
+- Added an instantaneous `|current| < VBAT_REST_CURRENT` check alongside the buffer-based `maxSliceI` gate. Belt-and-suspenders: maxSliceI catches cyclic loads over 80 s, the instant check catches a load that just started and hasn't propagated to the buffer yet.
+- Simulator (sim/trend_sim.py): refactored to advance at 100 ms ticks with a 10 s buffer push cadence so the between-push auto-zero dynamics can be reproduced. Added cyclic glaciere profile (`--cycle-s`, `--cycle-idle-s`). Removed the `--use-raw` / `--instant-gate` validation flags (the fixes are now baked in). Header carries a mini-changelog of bugs the sim helped pin down.
+- README intro rewritten in casual tinkerer tone — assumes the reader is in this for fun, not efficiency.
+- BAME → BaMe in user-facing strings and docs (Battery Meter); code identifiers (`BAME_DEV`, `BAME_DEBUG`, etc.) kept as-is.
+
 ## v1.15
 
 - Fixed aberrant watts reading at rest (e.g. 500-1000W). Root cause: the SOC blend was silently rewriting `coulombCount` while rest was active, and the current-smoothing buffer was reading the same variable — every correction showed up as a fake current spike for the full 80s window, which also kicked the rest gate off and made calibration flicker.

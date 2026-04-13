@@ -337,7 +337,7 @@ def _draw_info_row(d, row, voltage, vmin, selected=False):
 
 def screen_menu(d):
     d.clear()
-    draw_title(d, "Bame v1.15")  # src/main.cpp:593
+    draw_title(d, "Bame v1.16")  # src/main.cpp:593
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
     draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
@@ -349,7 +349,7 @@ def screen_menu(d):
 
 def screen_menu_edit(d):
     d.clear()
-    draw_title(d, "Bame v1.15")
+    draw_title(d, "Bame v1.16")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
     draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')

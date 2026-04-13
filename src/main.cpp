@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.15"
+#define BAME_VERSION "1.16"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -942,12 +942,14 @@ void updateMeasurements() {
 #if BAME_DEV
   //   flatNow    = flat slope detected NOW (chrono started) → optimistic open
   //   stableRest = flat slope confirmed for the full chrono → SOC blend + save
-  // Current gate: `maxSliceI < VBAT_REST_CURRENT` requires the current to have
-  // stayed low across EVERY 10s slice of the 80s buffer — so cyclic loads
-  // (compressor on/off) keep the gate shut even if `current` happens to be
-  // zero at the instant we evaluate. `bufMin > 0` also implies buffer is full.
+  // Two complementary current checks:
+  //   - maxSliceI catches cyclic loads across the full 80s window
+  //   - |current| catches a fresh load that started between sample pushes
+  //     (chist only refreshes every 10s, so without this the auto-zero below
+  //     could corrupt currentOffset before maxSliceI sees the new load)
   bool flatNow = (bufMin > 0)
               && (maxSliceI < VBAT_REST_CURRENT)
+              && (abs(current) < VBAT_REST_CURRENT)
               && (voltageTrend == 0);
   bool stableRest = flatNow && (now - flatSince >= FLAT_COUNTDOWN_MS);
 
@@ -962,9 +964,10 @@ void updateMeasurements() {
     calStartVoltage = 0;
   }
 #else
-  // Prod: direct gate — max current over any 10s slice low AND slope flat.
+  // Prod: direct gate — buffer+instant current low AND slope flat.
   bool stableRest = (bufMin > 0)
                  && (maxSliceI < VBAT_REST_CURRENT)
+                 && (abs(current) < VBAT_REST_CURRENT)
                  && (voltageTrend == 0);
 #endif
 

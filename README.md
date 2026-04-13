@@ -1,8 +1,10 @@
 # BaMe - Battery Meter
 
-A small battery monitor for the cheap, unbranded LiFePO4 packs you find in camping vans, solar setups and off-grid boxes. Those batteries don't talk — no BMS output, no datasheet, often a capacity that's generously rounded up. BaMe watches the current and voltage and figures out, over time, how much energy actually fits inside.
+A small, unambitious side project to put repurposed "dumb" golf-cart LiFePO4 batteries to work in a camping van. No BMS, no data interface, no datasheet — just a cheap pack of cells and a sticker with a capacity that's probably optimistic.
 
-Plug it in on your 12V/24V line with an INA226 shunt and an OLED, tell it roughly how many cells are in series and the nominal Ah written on the sticker, then forget about it. As you use the battery normally, each discharge + rest cycle refines the real capacity estimate and the State of Charge stays honest.
+Yes, buying a proper modern battery with its own BMS and bluetooth app would do this better. But it's more fun to poke at the problem with an Arduino, an INA226 shunt and a small OLED than to click "add to cart". If you like that kind of thing, this is that kind of thing.
+
+BaMe watches voltage and current, figures out over time how much energy actually fits inside, and gives you a gauge, a State of Charge, and an estimated time remaining that doesn't jump around every time the fridge kicks in.
 
 ## Features
 
