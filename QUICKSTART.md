@@ -37,7 +37,21 @@ Standard LFP packs:
 - **8S** = 24 V system (heavy-duty installs)
 - Anything else: add an env in `platformio.ini`.
 
-## 3. Build & flash
+## 3. First-time setup
+
+On Windows:
+
+```powershell
+.\setup.ps1
+```
+
+Installs Python, Pillow (for screenshot rendering) and MSYS2 (which
+provides gcc for building the shared C core used by the simulator).
+
+On Linux/macOS the only deps are Python, Pillow, gcc — all available via
+your package manager.
+
+## 4. Build & flash
 
 [PlatformIO](https://platformio.org/) is the build system, wrapped by a
 small Makefile for everyday tasks.

@@ -6,3 +6,10 @@ __pycache__
 # Local user overrides
 Makefile.local
 platformio_local.ini
+
+# Compiled bame_core shared library for sim/ (built via `make core-lib`)
+sim/bame_core.dll
+sim/bame_core.so
+sim/bame_core.dylib
+sim/libbame_core.so
+sim/libbame_core.dylib
