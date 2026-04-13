@@ -1,0 +1,6 @@
+# Copy this file to Makefile.local (gitignored) and adjust to your install.
+# Only override what you actually want different from Makefile defaults.
+
+# Pick the env that matches your wiring + cell count.
+# Run `make list-envs` to see what's available, or open platformio.ini.
+ENV = nano-load-4s

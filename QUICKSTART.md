@@ -39,21 +39,43 @@ Standard LFP packs:
 
 ## 3. Build & flash
 
-[PlatformIO](https://platformio.org/) is the build system.
+[PlatformIO](https://platformio.org/) is the build system, wrapped by a
+small Makefile for everyday tasks.
 
 ```bash
-# default — nano hardware, BUS, 4S
-pio run -t upload
+make              # build the default env
+make upload       # build + flash
+make monitor      # serial monitor
+make list-envs    # what env names are available
+```
 
-# explicit (recommended once you know your install)
-pio run -e nano-bus-4s   -t upload    # default
-pio run -e nano-load-4s  -t upload    # 12 V LOAD install
-pio run -e nano-bus-8s   -t upload    # 24 V BUS install
-pio run -e prod-bus-4s   -t upload    # production board (USBasp programmer)
+The default env is `nano-bus-4s`. To use a different one (your install),
+copy the template:
+
+```bash
+cp Makefile.local.example Makefile.local
+# edit Makefile.local, set ENV = nano-load-4s (or whatever matches)
+```
+
+`Makefile.local` is gitignored — your setup stays yours.
+
+Or override on the fly:
+
+```bash
+make ENV=nano-load-4s upload
 ```
 
 Each env outputs `.pio/build/<env-name>/firmware.hex`. The env name encodes
 the config so you can keep multiple firmwares around without confusion.
+
+Available variants (run `make list-envs`):
+
+- `nano-bus-4s`   — default, Arduino Nano dev, 12 V BUS install
+- `nano-load-4s`  — Arduino Nano dev, 12 V LOAD install
+- `nano-bus-8s`   — Arduino Nano dev, 24 V BUS install
+- `prod-bus-4s`   — production board (USBasp programmer), 12 V BUS
+- `prod-load-4s`  — production board, 12 V LOAD
+- `prod-bus-8s`   — production board, 24 V BUS
 
 ## 4. Configure on first boot
 

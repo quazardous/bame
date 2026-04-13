@@ -2,3 +2,7 @@
 .vscode
 .claude
 __pycache__
+
+# Local user overrides
+Makefile.local
+platformio_local.ini

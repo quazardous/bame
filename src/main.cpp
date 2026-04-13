@@ -1,18 +1,27 @@
+// ===========================================================================
+// BaMe v2 — pure coulomb counting
+//
+// Voltage is a display value plus a trigger for two events:
+//   - Charger disconnect at top voltage → "battery full", SOC reset to 100%
+//   - Voltage collapse → BMS cutoff, Ah delivered since last full = capacity
+//
+// In BUS install (every current passes the shunt) coulomb counting is
+// bidirectional and partial charges are tracked accurately. In LOAD install
+// the charger is invisible to the shunt, so an unexplained voltage rise
+// flags `socUncertain` until the next full event clears it.
+// ===========================================================================
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
 #include <avr/wdt.h>
-#if !BAME_DEV
-  #include <avr/sleep.h>
-  #include <avr/power.h>
-#endif
 #include <Adafruit_SSD1306.h>
 #include <INA226.h>
 #include "BameGFX.h"
+#include "bame_state.h"
 #include "display.h"
 #include "menu.h"
 
-// --- Configuration ---
 #define BAME_VERSION "2.0-wip"
 
 #ifndef BAME_DEBUG
@@ -21,486 +30,145 @@
 #ifndef BAME_DEV
   #define BAME_DEV 0
 #endif
-// BAME_DEV=1 → dev build (nano): no sleep, no V min/max menu (flash-constrained)
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_ADDR 0x3C
-
-// Bicolor screen zones defined in BameGFX.h
-#define INA226_ADDR 0x40
-
-// Foxeer Key23 keypad on analog pin
-#define KEY_PIN A3
-// Action button (NO, pull to GND)
-#define ACTION_BTN_PIN 2
-
-// LiFePO4 battery
-// Cell count is a compile-time constant (BAME_CELLS in platformio.ini).
-// It's a physical install decision — the count never changes for a given
-// hardware setup, so there's no menu item or EEPROM byte for it anymore.
 #ifndef BAME_CELLS
   #define BAME_CELLS 4
 #endif
-#define LFP_CELL_DEFAULT    BAME_CELLS
-
-// Charge detection wiring (BAME_WIRING_BUS in platformio.ini):
-//   1 → BUS  : BaMe sits on the battery bus — every load AND charge current
-//              goes through the INA226 shunt. Charge is detected by sustained
-//              negative current.
-//   0 → LOAD : BaMe sits on the load branch only — the charger is wired
-//              directly to the battery, bypassing the shunt. We never see
-//              charge current, so charge has to be inferred from voltage
-//              trend with a guard against the LFP rebound after a load.
 #ifndef BAME_WIRING_BUS
   #define BAME_WIRING_BUS 1
 #endif
-#define LFP_CELL_FULL       3.65
-#define LFP_CELL_EMPTY      2.50
-#define BATTERY_CAPACITY_AH 80.0
-#define SHUNT_RESISTANCE    0.0025
-#define MAX_CURRENT         30.0
 
-// Detection thresholds
-#define VBAT_REST_CURRENT  0.3    // max current to consider at rest
-#define VBAT_CHARGE_CURRENT 1.0  // min current to consider real charging
-#define ACTIVE_CURRENT     0.5    // min |current| to show discharge/charge indicators
-#define MIN_BATTERY_V      1.0    // min voltage to consider battery present
-#define CAPACITY_MIN       1.0    // Ah sanity bounds
-#define CAPACITY_MAX       500.0
-#define LFP_CELL_CHARGE     3.40  // per-cell voltage above which external charge is suspected
-#define LFP_CELL_CHARGE_MIN 3.375 // below this, a charger cannot be active
-#define LFP_CELL_VMIN_UTILE 3.00  // default user practical min per cell
-#define LFP_CELL_VMAX_UTILE 3.40  // default user practical max per cell (rest OCV at 100%)
-#define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
-#define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
+// --- Hardware pins / I2C ---
+#define SCREEN_WIDTH    128
+#define SCREEN_HEIGHT   64
+#define OLED_ADDR       0x3C
+#define INA226_ADDR     0x40
+#define KEY_PIN         A3
+#define ACTION_BTN_PIN  2
 
-// --- Voltage trend detection (linear regression over a ring buffer) ---
-// The firmware samples voltage every VHIST_INTERVAL_MS into a VHIST_SIZE buffer,
-// then computes a least-squares slope (in volts per sample step). The slope is
-// compared against VHIST_SLOPE_THRESHOLD to decide up/down/flat.
-//
-// VHIST_SIZE = 8 samples × 10s = 80s observation window.
-//   Tuned against sim/trend_sim.py on a realistic glaciere cycle
-//   (13.30V idle → 13.20V load → log recovery to 13.30V over ~3 min).
-//   16 samples (160s) averages the slope too much: a 100mV swing
-//   produces only ±5mV/step and the trend never triggers. 8 samples
-//   captures the same swing at ±8-12mV/step with ~20s detection latency.
-//
-// VHIST_SLOPE_THRESHOLD = 0.005 V/step = 0.5 mV/s average rate.
-//   Sim shows a 100mV glaciere drop peaks at ~-10mV/step and the log
-//   recovery peaks at ~+5mV/step — 0.005 catches both. A higher
-//   threshold (0.010) misses the recovery; a lower one (0.003)
-//   starts reacting to INA226 noise at rest.
-//
-// FLAT_COUNTDOWN_MS = 60s before the flat indicator vanishes.
-//   Arbitrary, visible to the user — it's just the chrono shown on
-//   screen while the arrow is flat; not used by the calibration gate.
-#define VHIST_SIZE             8
-#define VHIST_INTERVAL_MS      10000UL
-#define VHIST_SLOPE_THRESHOLD  0.005f
-#define FLAT_COUNTDOWN_MS      60000UL
-// When voltageTrend flips to flat, scan the buffer backwards: count the newest
-// samples that stay within FLAT_RETRO_SPREAD volts of each other, and backdate
-// flatSince accordingly. Lets the chrono finish sooner when voltage was
-// already quiet in the history.
-#define FLAT_RETRO_SPREAD      0.020f
+// --- INA226 ---
+#define SHUNT_RESISTANCE 0.0025f
+#define MAX_CURRENT      30.0f
 
-// Linear-regression denominators for x = 0..VHIST_SIZE-1 (compile-time folded).
-#define VHIST_SX  ((VHIST_SIZE) * ((VHIST_SIZE) - 1) / 2)
-#define VHIST_SXX ((VHIST_SIZE) * ((VHIST_SIZE) - 1) * (2 * (VHIST_SIZE) - 1) / 6)
-#define VHIST_D   ((long)(VHIST_SIZE) * (VHIST_SXX) - (long)(VHIST_SX) * (VHIST_SX))
+// --- LFP physics ---
+#define LFP_CELL_FULL          3.65f
+#define LFP_CELL_TOP_REST      3.40f   // OCV plateau for "full" detection
+#define LFP_CELL_BMS_NEAR      2.50f
 
-// --- Smoothed current display (EWMA / first-order low-pass, a.k.a. RC filter) ---
-// cAvg_new = alpha × current + (1 − alpha) × cAvg_old, run every tick.
-// Physical analogue: capacitor charging through a resistor — reacts to
-// changes with inertia. τ ≈ tick_interval / alpha. Tune τ vs responsiveness:
-//   τ = 30 s  : snappy, jitters visibly on glaciere cycles (spread ~3.5 A)
-//   τ = 60 s  : compromise
-//   τ = 120 s : very smooth but long memory of past loads
-// TODO: optional dead-band on top — ignore changes < ~50 mA so the watt
-// reading stops trembling at rest from INA226 residual noise.
-#define CAVG_EWMA_ALPHA  (MEASURE_INTERVAL_MS / 1000.0f / 30.0f)
+// --- User defaults ---
+#define BATTERY_CAPACITY_AH    80.0f
+#define CAPACITY_MIN           1.0f
+#define CAPACITY_MAX           500.0f
 
-// EEPROM layout for voltage calibration (after keypad: addr 11+)
-#define EEPROM_VCAL_MAGIC_ADDR 12
-#define EEPROM_VCAL_ADDR       13  // 2 x float = 8 bytes (13-20)
-#define EEPROM_VCAL_MAGIC_VAL  0xBB
+// --- Detection thresholds ---
+#define MIN_BATTERY_V          1.0f    // BMS cut → voltage collapses near 0
+#define VBAT_REST_CURRENT      0.3f
+#define ACTIVE_CURRENT         0.5f
+#define V_FULL_PER_CELL        LFP_CELL_TOP_REST
+#define FULL_REST_MS           30000UL // sustained "at top + low I" for full event
 
-// EEPROM layout for learned capacity (after vcal: addr 21+)
-#define EEPROM_CAP_MAGIC_ADDR 21
-#define EEPROM_CAP_ADDR       22  // 1 x float = 4 bytes (22-25)
-#define EEPROM_CAP_MAGIC_VAL  0xCC
+// --- Smoothing / pacing ---
+#define MEASURE_INTERVAL_MS    100
+#define DISPLAY_INTERVAL_MS    500
+#define CAVG_EWMA_TAU_S        30.0f
+#define CAVG_EWMA_ALPHA        (MEASURE_INTERVAL_MS / 1000.0f / CAVG_EWMA_TAU_S)
+#define EEPROM_SAVE_INTERVAL_MS 300000UL  // save coulombCount every 5 min
 
-// EEPROM layout for nominal capacity (addr 26+)
-#define EEPROM_NOM_MAGIC_ADDR 26
-#define EEPROM_NOM_ADDR       27  // 1 x float = 4 bytes (27-30)
-#define EEPROM_NOM_MAGIC_VAL  0xDD
+// --- EEPROM layout ---
+#define EEPROM_KEYPAD_MAGIC_ADDR 0
+#define EEPROM_KEYPAD_VAL        0xCA
+#define EEPROM_KEYPAD_DATA_ADDR  1       // 5 × int = 10B
+#define EEPROM_NOM_MAGIC_ADDR    11
+#define EEPROM_NOM_VAL           0xDD
+#define EEPROM_NOM_DATA_ADDR     12      // float
+#define EEPROM_LEARN_MAGIC_ADDR  16
+#define EEPROM_LEARN_VAL         0xEE
+#define EEPROM_LEARN_DATA_ADDR   17      // float
+#define EEPROM_COULOMB_MAGIC_ADDR 21
+#define EEPROM_COULOMB_VAL       0xCC
+#define EEPROM_COULOMB_DATA_ADDR 22      // float
 
-// EEPROM layout for cell count (addr 31)
-// EEPROM addr 31 was cell count — now compile-time (BAME_CELLS), addr free.
+#define CAL_BTN_COUNT 5
 
-// EEPROM layout for auto deep sleep
-#define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
-
-
-// Cell count and dynamic voltages
-// cellCount is fixed at compile time via BAME_CELLS; kept as a const for
-// readability since most call sites refer to it.
-extern const uint8_t cellCount = BAME_CELLS;
-float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;    // calibration window upper bound
-float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY; // calibration window lower bound
-
-// User practical operating range (set via menu, or hardcoded in dev build)
-#ifndef BAME_VMIN_UTILE
-  #define BAME_VMIN_UTILE (LFP_CELL_DEFAULT * LFP_CELL_VMIN_UTILE)
-#endif
-#ifndef BAME_VMAX_UTILE
-  #define BAME_VMAX_UTILE (LFP_CELL_DEFAULT * LFP_CELL_VMAX_UTILE)
-#endif
-float vMinUtile = BAME_VMIN_UTILE;
-float vMaxUtile = BAME_VMAX_UTILE;
-
-// INA226 current offset auto-zero (measured at stable rest)
-float currentOffset = 0;
-
-// Battery capacity
-float batteryCapacityNom = BATTERY_CAPACITY_AH;  // nominal (user)
-float batteryCapacityAh = BATTERY_CAPACITY_AH;   // estimated (calibration or nominal fallback)
-float batteryCapacityAs = BATTERY_CAPACITY_AH * 3600.0;
-
-// Capacity calibration by exponential doubling
-float calCoulombs = 0;          // accumulated coulombs for current segment
-float calChargeSec = 0;         // seconds of sustained charging
-float calTarget = 0;            // coulomb target (0 = initial time mode)
-float calStartVoltage = 0;      // rest voltage at segment start
-unsigned long calStartMs = 0;   // segment start timestamp
-#if BAME_DEV
-// Preempted segment end (dev-only, flash-heavy): flagged when target reached
-// AND chrono just started. If chrono elapses, commit. If voltage moves first,
-// rollback (extend segment).
-float pendingEndVoltage = 0;
-float pendingEndCoulombs = 0;   // 0 when no preempt pending
-unsigned long pendingEndMs = 0;
-#endif
-#define CAL_INITIAL_TIME_MS  120000  // 2 min for first step (longer = bigger delta SOC = better first estimate)
-#define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
-
-#if !BAME_DEV
-bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
-#else
-#define autoDeepSleep false
-#endif
-bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
-int8_t voltageTrend = 0;             // slope sign: -1 down, 0 flat, +1 up
-float bufMin = 0;                    // min voltage over sample buffer (0 until full)
-// Smoothed current from linear regression on coulombCount snapshots.
-// cAvg   : slope → average current over the VHIST_SIZE window (A). 0 until buffer full.
-// maxSliceI : largest consecutive-sample charge-diff / 10s → max |I| over any 10s slice.
-//             Used as the rest gate (catches cyclic loads that a mean would miss).
-float cAvg = 0;
-float maxSliceI = 0;
-#if BAME_DEV
-unsigned long flatSince = 0;         // last time arrow was up/down; drives calibration rest gate + display chrono
-#endif
-
-// --- Objects ---
+// ===========================================================================
+// Hardware objects (definitions for externs in bame_state.h)
+// ===========================================================================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 BameGFX gfx(display);
 INA226 ina(INA226_ADDR, &Wire);
 
-// --- Global variables ---
-float voltage = 0;
-float current = 0;
-float power = 0;
-float socPercent = 100.0;
-float coulombCount = 0;
-// coulombRaw = pure continuous integrator, NEVER corrected by SOC blend.
-// Used as the source for chist[] so cAvg is not polluted by blend jumps.
-// Renormalized when it exceeds bounds (deltas against chist entries preserved).
-float coulombRaw = 0;
+extern const uint8_t cellCount = BAME_CELLS;
+
+// --- State definitions ---
+float batteryCapacityNom = BATTERY_CAPACITY_AH;
+float batteryCapacityAh  = BATTERY_CAPACITY_AH;
+bool  capacityLearned    = false;
+
+float voltage       = 0;
+float current       = 0;
+float power         = 0;
+float currentOffset = 0;
+float cAvg          = 0;
+bool  cAvgInit      = false;
+
+float coulombCount  = 0;
+bool  socUncertain  = false;
+
+bool  batteryPresent = false;
+float coulombsAtLastFull       = 0;
+unsigned long sinceLastFullMs  = 0;
+
 unsigned long lastMeasure = 0;
 unsigned long lastDisplay = 0;
 
-#define MEASURE_INTERVAL_MS 100
-#define DISPLAY_INTERVAL_MS 500
+// Local-only state (not exposed via bame_state.h)
+static unsigned long restAtTopSinceMs = 0;  // when current first stayed low at high V
+static unsigned long lastEepromSaveMs = 0;
+static float vSlowAvg = 0;                  // slow-tracking voltage for LOAD partial-charge detection
 
-// ===========================================
-// Buttons - Foxeer Key23
-// ===========================================
-enum Button { BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_CENTER };
+// ===========================================================================
+// Buttons (Foxeer Key23 keypad + physical action button)
+// ===========================================================================
+static int keyCalVals[CAL_BTN_COUNT] = {838, 616, 1, 748, 416};
+static int keyThresholds[CAL_BTN_COUNT];
 
-// Forward declarations
-void waitButtonRelease();
-Button readButton();
-float socFromVoltage(float v);
-void settingsMenu();
-void batteryMenu();
-
-#define MENU_PRESS_MS      500  // long press -> system menu
-#if !BAME_DEV
-// Sleep
-#define DEEPSLEEP_PRESS_MS 3000 // longer press -> deep sleep
-#define AUTO_SLEEP_MS    60000   // 60s no interaction -> screen sleep
-#define AUTO_DEEPSLEEP_MS 300000 // 5min no interaction -> deep sleep
-bool oledSleeping = false;
-#else
-#define oledSleeping false
-#endif
-unsigned long lastInteraction = 0;
-
-#if !BAME_DEV
-// ISR for deep sleep wake-up (INT0 on D2)
-volatile bool wakeUpFlag = false;
-void wakeUpISR() { wakeUpFlag = true; }
-
-void enterOledSleep() {
-  oledSleeping = true;
-  display.ssd1306_command(SSD1306_DISPLAYOFF);
-}
-
-void exitOledSleep() {
-  oledSleeping = false;
-  display.ssd1306_command(SSD1306_DISPLAYON);
-}
-
-// Watchdog ISR for periodic wake-up
-volatile bool wdtWakeUp = false;
-ISR(WDT_vect) { wdtWakeUp = true; }
-
-void enterDeepSleep() {
-  #if BAME_DEBUG
-  Serial.println(F("[SLEEP] Deep sleep..."));
-  Serial.flush();
-  #endif
-  display.ssd1306_command(SSD1306_DISPLAYOFF);
-
-  // Wake-up via D2 button
-  attachInterrupt(digitalPinToInterrupt(ACTION_BTN_PIN), wakeUpISR, LOW);
-
-  // Configure 8s watchdog for periodic wake-up (voltage measurement)
-  cli();
-  wdt_reset();
-  MCUSR &= ~(1 << WDRF);
-  WDTCSR |= (1 << WDCE) | (1 << WDE);
-  WDTCSR = (1 << WDIE) | (1 << WDP3) | (1 << WDP0); // 8s, interrupt mode
-  sei();
-
-  // Adaptive interval: 5min (38 cycles) to 1h (450 cycles)
-  // Faster voltage drop = more frequent measurements
-  #define WDT_CYCLES_MIN  38   // 5 min
-  #define WDT_CYCLES_MAX  450  // 1 heure
-  uint16_t wdtTarget = WDT_CYCLES_MAX; // start slow
-  uint16_t wdtCount = 0;
-  float prevVoltage = voltage;
-
-  while (!wakeUpFlag) {
-    wdtWakeUp = false;
-    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-    sleep_enable();
-    sleep_mode();
-    sleep_disable();
-
-    if (wdtWakeUp && !wakeUpFlag) {
-      wdtCount++;
-      if (wdtCount >= wdtTarget) {
-        wdtCount = 0;
-
-        // Measure (skip first reading after INA226 restart — noisy)
-        Wire.begin();
-        if (ina.begin()) {
-          ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
-          ina.getBusVoltage(); // discard first reading
-          ina.getCurrent();
-          voltage = ina.getBusVoltage();
-          current = ina.getCurrent();
-
-          // Adapt interval based on voltage variation
-          float deltaV = abs(voltage - prevVoltage);
-          prevVoltage = voltage;
-
-          if (deltaV > 0.5) {
-            wdtTarget = WDT_CYCLES_MIN;        // fast drop -> 5min
-          } else if (deltaV > 0.1) {
-            wdtTarget = WDT_CYCLES_MIN * 3;    // ~15min
-          } else if (deltaV > 0.02) {
-            wdtTarget = WDT_CYCLES_MAX / 2;    // ~30min
-          } else {
-            wdtTarget = WDT_CYCLES_MAX;         // stable -> 1h
-          }
-        }
-      }
-    }
-  }
-
-  // --- Wake-up by button ---
-  // Disable watchdog
-  wdt_disable();
-  detachInterrupt(digitalPinToInterrupt(ACTION_BTN_PIN));
-
-  display.ssd1306_command(SSD1306_DISPLAYON);
-  oledSleeping = false;
-  wakeUpFlag = false;
-
-  // Re-sync SOC from voltage on wake-up
-  socPercent = socFromVoltage(voltage);
-  coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-
-  #if BAME_DEBUG
-  Serial.println(F("[SLEEP] Wake up"));
-  #endif
-  waitButtonRelease();
-}
-#endif // !BAME_DEV
-
-// EEPROM layout for keypad calibration
-#define EEPROM_MAGIC_ADDR 0        // 1 byte: 0xCA = calibrated
-#define EEPROM_CAL_ADDR   1        // 5 x 2 bytes (int) = 10 bytes
-#define EEPROM_MAGIC_VAL  0xCA
-#define CAL_BTN_COUNT 5
-
-// Order: CENTER, UP, DOWN, LEFT, RIGHT (sorted: 1, 416, 616, 748, 838)
-// Gaps: 1-416=415, 416-616=200, 616-748=132, 748-838=90, 838-1023=185
-// Tolerance = min(left gap, right gap) / 2
-int keyCalVals[CAL_BTN_COUNT] = {838, 616, 1, 748, 416}; // defaults with 10k pullup
-
-
-void saveCalToEEPROM() {
-  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
+static void saveKeypadEEPROM() {
+  EEPROM.write(EEPROM_KEYPAD_MAGIC_ADDR, EEPROM_KEYPAD_VAL);
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
-    EEPROM.put(EEPROM_CAL_ADDR + i * 2, keyCalVals[i]);
+    EEPROM.put(EEPROM_KEYPAD_DATA_ADDR + i * 2, keyCalVals[i]);
   }
 }
-
-bool loadCalFromEEPROM() {
-  if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VAL) return false;
+static bool loadKeypadEEPROM() {
+  if (EEPROM.read(EEPROM_KEYPAD_MAGIC_ADDR) != EEPROM_KEYPAD_VAL) return false;
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
-    EEPROM.get(EEPROM_CAL_ADDR + i * 2, keyCalVals[i]);
+    EEPROM.get(EEPROM_KEYPAD_DATA_ADDR + i * 2, keyCalVals[i]);
   }
   return true;
 }
 
-// Helpers: keep Ah and As in sync, reset calibration segment
-inline void setCapacity(float ah) {
-  batteryCapacityAh = ah;
-  batteryCapacityAs = ah * 3600.0;
-}
-inline void resetCalibration() {
-  calCoulombs = 0;
-  calTarget = 0;
-  calStartVoltage = 0;
-#if BAME_DEV
-  pendingEndCoulombs = 0;
-#endif
-}
-
-// --- Voltage calibration EEPROM ---
-void saveVcalToEEPROM() {
-  EEPROM.write(EEPROM_VCAL_MAGIC_ADDR, EEPROM_VCAL_MAGIC_VAL);
-  EEPROM.put(EEPROM_VCAL_ADDR, vbatTop);
-  EEPROM.put(EEPROM_VCAL_ADDR + sizeof(float), vbatBottom);
-}
-
-bool loadVcalFromEEPROM() {
-  if (EEPROM.read(EEPROM_VCAL_MAGIC_ADDR) != EEPROM_VCAL_MAGIC_VAL) return false;
-  EEPROM.get(EEPROM_VCAL_ADDR, vbatTop);
-  EEPROM.get(EEPROM_VCAL_ADDR + sizeof(float), vbatBottom);
-  // Sanity check
-  float vFull = cellCount * LFP_CELL_FULL;
-  float vEmpty = cellCount * LFP_CELL_EMPTY;
-  if (vbatTop < vEmpty || vbatTop > vFull * 1.4) vbatTop = vFull;
-  if (vbatBottom < vEmpty * 0.5 || vbatBottom > vFull) vbatBottom = vEmpty;
-  if (vbatBottom >= vbatTop) { vbatTop = vFull; vbatBottom = vEmpty; }
-  return true;
-}
-
-// --- EEPROM helpers for float ---
-void saveFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float val) {
-  EEPROM.write(magicAddr, magicVal);
-  EEPROM.put(dataAddr, val);
-}
-
-bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float &val) {
-  if (EEPROM.read(magicAddr) != magicVal) return false;
-  EEPROM.get(dataAddr, val);
-  return true;
-}
-
-// Estimated capacity (calibration). Was a macro — promoted to a real function
-// so the linker can find it from menu.cpp.
-void saveCapToEEPROM() {
-  saveFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh);
-}
-bool loadCapFromEEPROM() {
-  if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
-  if (batteryCapacityAh < CAPACITY_MIN || batteryCapacityAh > CAPACITY_MAX) batteryCapacityAh = batteryCapacityNom;
-  batteryCapacityAs = batteryCapacityAh * 3600.0;
-  return true;
-}
-// Note: loadCapFromEEPROM reads directly into batteryCapacityAh via EEPROM.get
-
-// Nominal capacity (user). Promoted from macro to function for linker access.
-void saveNomToEEPROM() {
-  saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom);
-}
-bool loadNomFromEEPROM() {
-  if (!loadFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)) return false;
-  if (batteryCapacityNom < CAPACITY_MIN || batteryCapacityNom > CAPACITY_MAX) batteryCapacityNom = BATTERY_CAPACITY_AH;
-  return true;
-}
-
-void resetCapEEPROM() {
-  EEPROM.write(EEPROM_CAP_MAGIC_ADDR, 0xFF);
-  setCapacity(batteryCapacityNom);
-  resetCalibration();
-  calStartMs = 0;
-}
-
-#if !BAME_DEV
-void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
-void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
-#endif
-
-
-// Thresholds computed dynamically from calibrated values
-// Each button has its own tolerance = distance to nearest neighbor / 2
-int keyThresholds[CAL_BTN_COUNT];
-
-void computeThresholds() {
-  // Sort values to find distances
-  int sorted[CAL_BTN_COUNT + 1]; // +1 for NONE (1023)
+static void computeKeypadThresholds() {
+  int sorted[CAL_BTN_COUNT + 1];
   int sortIdx[CAL_BTN_COUNT];
-  for (int i = 0; i < CAL_BTN_COUNT; i++) {
-    sorted[i] = keyCalVals[i];
-    sortIdx[i] = i;
-  }
-  sorted[CAL_BTN_COUNT] = 1023; // idle value
-
-  // Simple sort of values
+  for (int i = 0; i < CAL_BTN_COUNT; i++) { sorted[i] = keyCalVals[i]; sortIdx[i] = i; }
+  sorted[CAL_BTN_COUNT] = 1023;
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
     for (int j = i + 1; j < CAL_BTN_COUNT; j++) {
       if (sorted[j] < sorted[i]) {
-        int tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
-        tmp = sortIdx[i]; sortIdx[i] = sortIdx[j]; sortIdx[j] = tmp;
+        int t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t;
+        t = sortIdx[i]; sortIdx[i] = sortIdx[j]; sortIdx[j] = t;
       }
     }
   }
-
-  // Compute threshold for each button
   for (int i = 0; i < CAL_BTN_COUNT; i++) {
-    int distLeft = (i == 0) ? sorted[i] : sorted[i] - sorted[i - 1];
+    int distLeft  = (i == 0) ? sorted[i] : sorted[i] - sorted[i - 1];
     int distRight = sorted[i + 1] - sorted[i];
-    int minDist = (distLeft < distRight) ? distLeft : distRight;
+    int minDist   = (distLeft < distRight) ? distLeft : distRight;
     keyThresholds[sortIdx[i]] = minDist / 2 - 1;
     if (keyThresholds[sortIdx[i]] < 10) keyThresholds[sortIdx[i]] = 10;
   }
 }
 
 Button readButton() {
-  // Physical action button = CENTER
   if (digitalRead(ACTION_BTN_PIN) == LOW) return BTN_CENTER;
-
-  // Foxeer pad
   int val = analogRead(KEY_PIN);
   if (abs(val - keyCalVals[0]) < keyThresholds[0]) return BTN_CENTER;
   if (abs(val - keyCalVals[1]) < keyThresholds[1]) return BTN_UP;
@@ -510,7 +178,6 @@ Button readButton() {
   return BTN_NONE;
 }
 
-// Debounce: returns button if stable for 50ms
 Button readButtonDebounced() {
   Button b = readButton();
   if (b == BTN_NONE) return BTN_NONE;
@@ -519,667 +186,232 @@ Button readButtonDebounced() {
   return (b == b2) ? b : BTN_NONE;
 }
 
-// Wait for button release
 void waitButtonRelease() {
   while (readButton() != BTN_NONE) delay(10);
 }
 
-// Long press: 2 tiers — SYSTEM menu (1.5s) or deep sleep (3s)
-void checkLongPress() {
-  unsigned long pressStart = millis();
-  while (readButton() == BTN_CENTER) {
-    unsigned long held = millis() - pressStart;
-#if !BAME_DEV
-    if (held >= MENU_PRESS_MS) {
-      display.clearDisplay();
-      float pct = (float)(held - MENU_PRESS_MS) * 100.0f / (DEEPSLEEP_PRESS_MS - MENU_PRESS_MS);
-      if (pct > 100.0f) pct = 100.0f;
-      gfx.drawGauge(pct, F("SLEEP"));
-      display.display();
-    }
-    if (held >= DEEPSLEEP_PRESS_MS) {
-      waitButtonRelease();
-      enterDeepSleep();
-      lastMeasure = millis();
-      lastInteraction = millis();
-      return;
-    }
-#endif
-    delay(50);
-  }
-  // Released — open menu if held past tier 1
-  if (millis() - pressStart >= MENU_PRESS_MS) {
-    waitButtonRelease();
-    settingsMenu();
-    lastInteraction = millis();
-  }
+// ===========================================================================
+// EEPROM persistence
+// ===========================================================================
+static void saveFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float val) {
+  EEPROM.write(magicAddr, magicVal);
+  EEPROM.put(dataAddr, val);
+}
+static bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float &val) {
+  if (EEPROM.read(magicAddr) != magicVal) return false;
+  EEPROM.get(dataAddr, val);
+  return true;
 }
 
-// ===========================================
-// SOC
-// ===========================================
-struct SocPoint {
-  float voltage;
-  float soc;
-};
-
-// Per-cell LFP SOC curve (chemistry-defined shape)
-const SocPoint socCurve[] = {
-  {3.65, 100}, {3.40,  99}, {3.35,  90}, {3.325, 70},
-  {3.30,  40}, {3.275, 30}, {3.25,  20}, {3.20,  17},
-  {3.00,  14}, {2.75,   9}, {2.50,   0},
-};
-const int socCurveSize = sizeof(socCurve) / sizeof(socCurve[0]);
-
-float socFromVoltage(float v) {
-  // Convert pack voltage to per-cell, rescale to reference curve
-  float vCell = v / cellCount;
-  float vMinCell = vbatBottom / cellCount;
-  float vMaxCell = vbatTop / cellCount;
-  float vScaled = LFP_CELL_EMPTY +
-    (vCell - vMinCell) / (vMaxCell - vMinCell) *
-    (LFP_CELL_FULL - LFP_CELL_EMPTY);
-
-  if (vScaled >= socCurve[0].voltage) return 100.0;
-  if (vScaled <= socCurve[socCurveSize - 1].voltage) return 0.0;
-  for (int i = 0; i < socCurveSize - 1; i++) {
-    if (vScaled >= socCurve[i + 1].voltage) {
-      float ratio = (vScaled - socCurve[i + 1].voltage) / (socCurve[i].voltage - socCurve[i + 1].voltage);
-      return socCurve[i + 1].soc + ratio * (socCurve[i].soc - socCurve[i + 1].soc);
-    }
-  }
-  return 0.0;
+void saveNomEEPROM() {
+  saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_VAL, EEPROM_NOM_DATA_ADDR, batteryCapacityNom);
+}
+void saveLearnedEEPROM() {
+  saveFloatEEPROM(EEPROM_LEARN_MAGIC_ADDR, EEPROM_LEARN_VAL, EEPROM_LEARN_DATA_ADDR, batteryCapacityAh);
+}
+void saveCoulombEEPROM() {
+  saveFloatEEPROM(EEPROM_COULOMB_MAGIC_ADDR, EEPROM_COULOMB_VAL, EEPROM_COULOMB_DATA_ADDR, coulombCount);
+}
+void resetAllEEPROM() {
+  for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
 }
 
-// ===========================================
-// Diagnostics
-// ===========================================
+// ===========================================================================
+// Helpers
+// ===========================================================================
+void setCapacityNom(float ah) {
+  batteryCapacityNom = ah;
+  if (!capacityLearned) batteryCapacityAh = ah;
+}
 
+// "Battery full" event handler. Called by both the auto-detector below and
+// the manual menu action.
+void declareBatteryFull(unsigned long now) {
+  coulombCount = capacityAs();
+  coulombsAtLastFull = coulombCount;
+  sinceLastFullMs = now;
+  socUncertain = false;
+  saveCoulombEEPROM();
+  saveLearnedEEPROM();
+}
 
-// ===========================================
-// Mode normal
-// ===========================================
+// "BMS cutoff" event handler. The Ah delivered since the last full event IS
+// the measured capacity for this discharge cycle. Blend into learned cap.
+static void declareBMSCutoff(unsigned long now) {
+  if (sinceLastFullMs == 0) return;  // never had a full reference, can't measure
+  float deliveredC = coulombsAtLastFull - coulombCount;
+  if (deliveredC <= 0) return;
+  float deliveredAh = deliveredC / 3600.0f;
+  if (deliveredAh < CAPACITY_MIN || deliveredAh > CAPACITY_MAX) return;
+  if (!capacityLearned) {
+    batteryCapacityAh = deliveredAh;
+    capacityLearned = true;
+  } else {
+    // 30% blend toward the new sample → converges over a few cycles
+    batteryCapacityAh = batteryCapacityAh * 0.70f + deliveredAh * 0.30f;
+  }
+  saveLearnedEEPROM();
+  coulombCount = 0;
+  sinceLastFullMs = 0;
+}
 
-// --- Sensor readings ---
-float readVoltage() { return ina.getBusVoltage(); }
-float readCurrent() {
+// ===========================================================================
+// Sensor reads
+// ===========================================================================
+static float readVoltage() { return ina.getBusVoltage(); }
+static float readCurrent() {
   float c = ina.getCurrent() - currentOffset;
-  if (abs(c) < 0.05) c = 0;  // dead band to avoid -0.0 display
+  if (abs(c) < 0.05) c = 0;       // dead band against ±0.0 jitter
   return c;
 }
-float readPower() { return ina.getPower(); }
 
-void updateMeasurements() {
+// ===========================================================================
+// Measurement loop — one tick (every MEASURE_INTERVAL_MS).
+// ===========================================================================
+static void updateMeasurements() {
   voltage = readVoltage();
   current = readCurrent();
-  power = readPower();
+  power   = ina.getPower();
 
-  // EWMA of current at every tick (physical: thermometer with τ=120s memory).
-  // Initialized on the first valid reading so the display doesn't ramp from
-  // zero over several minutes after boot.
-  static bool cAvgInit = false;
+  // EWMA on the smoothed current (display only)
   if (!cAvgInit) { cAvg = current; cAvgInit = true; }
   else           { cAvg = CAVG_EWMA_ALPHA * current + (1.0f - CAVG_EWMA_ALPHA) * cAvg; }
 
   unsigned long now = millis();
-  float dtSeconds = (now - lastMeasure) / 1000.0;
+  float dtSeconds = (now - lastMeasure) / 1000.0f;
+  if (dtSeconds <= 0 || dtSeconds > 1.0f) dtSeconds = 0;
   lastMeasure = now;
 
-  // No battery
-  static bool batteryPresent = false;
+  // BMS cutoff: voltage collapse → battery is silent. Record the cycle.
   if (voltage < MIN_BATTERY_V) {
-    batteryPresent = false;
-    socPercent = 0;
-    coulombCount = 0;
+    if (batteryPresent) {
+      declareBMSCutoff(now);
+      batteryPresent = false;
+    }
     return;
   }
-
-  // 1) Init: wait for stable voltage before locking SOC
   if (!batteryPresent) {
-    socPercent = socFromVoltage(voltage);
-    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-    if (voltage >= vbatBottom) {
-      batteryPresent = true;
+    // (Re)connection: trust whatever was in EEPROM. If the value is clearly
+    // bogus, fall back to "assume nominal full" and flag uncertainty.
+    if (coulombCount <= 0 || coulombCount > capacityAs() * 1.10f) {
+      coulombCount = capacityAs();
+      socUncertain = true;
     }
-    return;
+    batteryPresent = true;
+    vSlowAvg = voltage;
   }
 
-  // 2) Coulomb counting
+  // Coulomb integration. Negative current (charge in BUS install) increases
+  // the count. Allow modest over/under-shoot so a cycle measurement at BMS
+  // cutoff sees the real delivered Ah.
   coulombCount -= current * dtSeconds;
-  coulombRaw   -= current * dtSeconds;  // parallel, no clamp, no blend correction
-  if (coulombCount > batteryCapacityAs) coulombCount = batteryCapacityAs;
-  if (coulombCount < 0) coulombCount = 0;
-  socPercent = (coulombCount / batteryCapacityAs) * 100.0;
+  float capAs = capacityAs();
+  if (coulombCount > capAs * 1.10f) coulombCount = capAs * 1.10f;
+  if (coulombCount < -capAs * 0.10f) coulombCount = -capAs * 0.10f;
 
-  // 3) Exponential doubling calibration
-  //    Accumulate discharge coulombs. A partial recharge invalidates
-  //    the segment because the voltage-SOC mapping becomes unreliable
-  //    after a charge event (surface charge, hysteresis).
-  if (current > 0) {
-    calCoulombs += current * dtSeconds;
-    calChargeSec = 0;
-  } else if (current < -VBAT_CHARGE_CURRENT) {
-    // Invalidate only after sustained real charging (>1A for >5s)
-    calChargeSec += dtSeconds;
-    if (calChargeSec >= 10.0) { // 10s sustained >1A to invalidate
-      resetCalibration();
-      calChargeSec = 0;
-    }
-  } else {
-    calChargeSec = 0;
-  }
-
-  // 4) Buffer analysis: voltage slope + smoothed current.
-  //    Two parallel ring buffers sampled at the same 10s cadence:
-  //    - vhist[]: voltage snapshots → slope → trend (up/down/flat)
-  //    - chist[]: coulombCount snapshots → slope → average current (cAvg)
-  //      AND consecutive-diffs → max current per 10s slice (maxSliceI, gate)
-  //    Using coulombCount (continuously integrated at 100 ms) avoids the
-  //    aliasing of snapshotting raw current on a cyclic load.
-  {
-    static float vhist[VHIST_SIZE];
-    static float chist[VHIST_SIZE];  // coulombCount snapshots (A·s)
-    static uint8_t vhistIdx = 0;
-    static uint8_t vhistCount = 0;
-    static unsigned long vhistLastMs = 0;
-
-    if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL_MS) {
-      // Renormalize coulombRaw to keep float precision bounded: if it drifts
-      // past ±100k A·s, subtract its value from all chist entries AND from
-      // coulombRaw itself — deltas (what cAvg uses) are preserved.
-      if (coulombRaw > 100000.0f || coulombRaw < -100000.0f) {
-        float shift = coulombRaw;
-        for (uint8_t i = 0; i < VHIST_SIZE; i++) chist[i] -= shift;
-        coulombRaw = 0;
-      }
-      vhist[vhistIdx] = voltage;
-      chist[vhistIdx] = coulombRaw;
-      vhistIdx = (vhistIdx + 1) % VHIST_SIZE;
-      if (vhistCount < VHIST_SIZE) vhistCount++;
-      vhistLastMs = now;
-    }
-
-    if (vhistCount == VHIST_SIZE) {
-      uint8_t startIdx = vhistIdx; // oldest sample (buffer full)
-      float sumY = 0, sumIY = 0;
-      bufMin = vhist[startIdx];
-      float prevC = chist[startIdx];
-      maxSliceI = 0;
-      for (uint8_t i = 0; i < VHIST_SIZE; i++) {
-        float v = vhist[(startIdx + i) % VHIST_SIZE];
-        float c = chist[(startIdx + i) % VHIST_SIZE];
-        sumY  += v;
-        sumIY += (float)i * v;
-        if (v < bufMin) bufMin = v;
-        if (i > 0) {
-          // |ΔcoulombCount| / 10s = |average current| over this 10s slice.
-          float sliceI = fabs(c - prevC) / (float)(VHIST_INTERVAL_MS / 1000);
-          if (sliceI > maxSliceI) maxSliceI = sliceI;
-        }
-        prevC = c;
-      }
-      // Voltage slope (V / 10s step), compile-time folded Sx/D.
-      float slopeV = ((float)VHIST_SIZE * sumIY - (float)VHIST_SX * sumY) / (float)VHIST_D;
-      voltageTrend = (slopeV > VHIST_SLOPE_THRESHOLD) ? 1
-                   : (slopeV < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
-    }
-#if BAME_WIRING_BUS
-    // BUS install: every current goes through the shunt — current sense is
-    // the unambiguous signal. Voltage trend stays only as a UI cue (arrow /
-    // chrono), not gated on charge detection.
-    externalChargeDetected = (current <= -VBAT_CHARGE_CURRENT
-                              && calChargeSec >= 5.0);
-#else
-    // LOAD install: charger is upstream of the shunt, so we never see
-    // negative current. Detect charge purely from voltage trend, with the
-    // LFP_CELL_CHARGE_MIN guard rejecting the post-load rebound (voltage
-    // rises briefly then settles — looks like a charge but isn't).
-    if (voltageTrend > 0) externalChargeDetected = true;
-    else if (voltageTrend < 0) externalChargeDetected = false;
-    if (voltage < cellCount * LFP_CELL_CHARGE_MIN) {
-      externalChargeDetected = false;
-    }
-#endif
-
-    if (externalChargeDetected) resetCalibration();
-
-#if BAME_DEV
-    // Flat chrono (dev-only, flash-heavy): tracks how long the arrow has been
-    // "flat" (neither up nor down). Once (now - flatSince) >= FLAT_COUNTDOWN_MS,
-    // the rest gate opens (stableRest, see below). Two paths keep flatSince
-    // up to date:
-    //
-    //  (a) Reset to now whenever the arrow is NOT flat, or the buffer is
-    //      still warming up (bufMin == 0 means we haven't computed a slope
-    //      yet, so "flat" is meaningless).
-    //
-    //  (b) Back-dating when the arrow IS flat: scan the sample buffer from
-    //      the newest sample backwards, counting consecutive samples whose
-    //      range (max - min) stays within FLAT_RETRO_SPREAD volts. That
-    //      gives the length of the "quiet tail" already present in history.
-    //      Range is used instead of std dev: on N <= 8 post-INA226-averaging
-    //      samples the noise is near-gaussian and small, so range ≈ 4·σ.
-    //      Only pulls flatSince earlier, never later, so a long steady
-    //      chrono already in progress is not shortened.
-    if (voltageTrend != 0 || bufMin == 0) {
-      flatSince = now;
-    } else if (vhistCount == VHIST_SIZE) {
-      uint8_t newest = (vhistIdx + VHIST_SIZE - 1) % VHIST_SIZE;
-      float tMin = vhist[newest];
-      float tMax = tMin;
-      uint8_t flatCount = 1;
-      for (uint8_t back = 1; back < VHIST_SIZE; back++) {
-        uint8_t idx = (newest + VHIST_SIZE - back) % VHIST_SIZE;
-        float v = vhist[idx];
-        if (v < tMin) tMin = v;
-        if (v > tMax) tMax = v;
-        if (tMax - tMin > FLAT_RETRO_SPREAD) break;
-        flatCount++;
-      }
-      unsigned long backdated = now - (unsigned long)(flatCount - 1) * VHIST_INTERVAL_MS;
-      if ((long)(backdated - flatSince) < 0) flatSince = backdated;
-    }
-#endif
-  }
-
-  // 5) Rest detection + segment save.
-  // Dev build uses the flat chrono (optimistic open, preempt/commit/rollback).
-  // Prod build uses a simpler direct gate to fit in flash.
-#if BAME_DEV
-  //   flatNow    = flat slope detected NOW (chrono started) → optimistic open
-  //   stableRest = flat slope confirmed for the full chrono → SOC blend + save
-  // Two complementary current checks:
-  //   - maxSliceI catches cyclic loads across the full 80s window
-  //   - |current| catches a fresh load that started between sample pushes
-  //     (chist only refreshes every 10s, so without this the auto-zero below
-  //     could corrupt currentOffset before maxSliceI sees the new load)
-  bool flatNow = (bufMin > 0)
-              && (maxSliceI < VBAT_REST_CURRENT)
-              && (abs(current) < VBAT_REST_CURRENT)
-              && (voltageTrend == 0);
-  bool stableRest = flatNow && (now - flatSince >= FLAT_COUNTDOWN_MS);
-
-  // Optimistic segment open on chrono start (don't wait 60s).
-  if (flatNow && !externalChargeDetected && calStartVoltage == 0) {
-    calStartVoltage = voltage;
-    calStartMs = now;
-  }
-  // Discard optimistic open if flat reverted without any discharge flowing.
-  if (voltageTrend != 0 && calStartVoltage > 0 && calCoulombs == 0
-      && now - flatSince < FLAT_COUNTDOWN_MS) {
-    calStartVoltage = 0;
-  }
-#else
-  // Prod: direct gate — buffer+instant current low AND slope flat.
-  bool stableRest = (bufMin > 0)
-                 && (maxSliceI < VBAT_REST_CURRENT)
-                 && (abs(current) < VBAT_REST_CURRENT)
-                 && (voltageTrend == 0);
-#endif
-
-  if (stableRest && !externalChargeDetected) {
-    float socV = socFromVoltage(voltage);
-    socPercent = socPercent * 0.92 + socV * 0.08;
-    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-    // Auto-zero current offset
+  // Slow auto-zero of the current offset whenever |I| is low. Keeps a small
+  // sensor bias from accumulating into the integrator over days.
+  if (abs(current) < VBAT_REST_CURRENT) {
     float raw = current + currentOffset;
-    currentOffset = currentOffset * 0.9 + raw * 0.1;
-#if !BAME_DEV
-    // Prod: init segment start on first stable rest (dev does it optimistically above).
-    if (calStartVoltage == 0) {
-      calStartVoltage = voltage;
-      calStartMs = now;
-    }
-#endif
-    // Slow Vmax convergence toward observed rest voltage
-    if (current >= -VBAT_REST_CURRENT && voltage > vbatTop * 0.98f) {
-      float conv = (voltage > vbatTop) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
-      vbatTop = vbatTop * (1.0f - conv) + voltage * conv;
-    }
+    currentOffset = currentOffset * 0.99f + raw * 0.01f;
   }
 
-  // Segment end gate: target reached?
-  bool calTargetReached;
-  if (calTarget <= 0) {
-    calTargetReached = (now - calStartMs >= CAL_INITIAL_TIME_MS)
-                    && (calCoulombs >= CAL_MIN_COULOMBS);
+  // --- Event: "battery full" (works for both BUS and LOAD wirings) ---
+  // Voltage at top, current near zero, sustained for FULL_REST_MS.
+  bool atTop = (voltage / cellCount) >= V_FULL_PER_CELL
+            && abs(current) < VBAT_REST_CURRENT;
+  if (atTop) {
+    if (restAtTopSinceMs == 0) restAtTopSinceMs = now;
+    if ((now - restAtTopSinceMs) >= FULL_REST_MS) {
+      declareBatteryFull(now);
+      restAtTopSinceMs = 0;
+    }
   } else {
-    calTargetReached = (calCoulombs >= calTarget);
+    restAtTopSinceMs = 0;
   }
 
-#if BAME_DEV
-  // --- Dev: preempt / commit / rollback ---
-  // Preempt: target reached AND flat just detected → freeze candidate end.
-  if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0
-      && flatNow && !externalChargeDetected
-      && pendingEndCoulombs == 0) {
-    pendingEndVoltage = voltage;
-    pendingEndCoulombs = calCoulombs;
-    pendingEndMs = now;
-    calCoulombs = 0;
+#if !BAME_WIRING_BUS
+  // LOAD install: invisible partial charges leave the integrator stale. Watch
+  // the slow voltage average — any rise > 50 mV that doesn't culminate in a
+  // full event flags the SOC as uncertain. Cleared by the next full event.
+  if (voltage - vSlowAvg > 0.05f) {
+    socUncertain = true;
   }
-  // Rollback: voltage moved before chrono elapsed → extend previous segment.
-  if (pendingEndCoulombs > 0 && voltageTrend != 0
-      && now - flatSince < FLAT_COUNTDOWN_MS) {
-    calCoulombs += pendingEndCoulombs;
-    pendingEndCoulombs = 0;
-  }
-  // Commit: chrono elapsed while pending → finalize segment with preempted end.
-  if (pendingEndCoulombs > 0 && stableRest && !externalChargeDetected) {
-    float socStart = socFromVoltage(calStartVoltage);
-    float socEnd = socFromVoltage(pendingEndVoltage);
-    float deltaSoc = socStart - socEnd;
-    if (deltaSoc > 5.0) {
-      float estAh = (pendingEndCoulombs / 3600.0) / (deltaSoc / 100.0);
-      if (estAh > CAPACITY_MIN && estAh < CAPACITY_MAX) {
-        float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
-        setCapacity(batteryCapacityAh * (1.0 - weight) + estAh * weight);
-        saveCapToEEPROM();
-      }
-    }
-    saveVcalToEEPROM();
-    calTarget = pendingEndCoulombs * 2.0;
-    calStartVoltage = pendingEndVoltage;
-    calStartMs = pendingEndMs;
-    pendingEndCoulombs = 0;
-  }
-#else
-  // --- Prod: single-shot save when target reached AND currently at rest ---
-  if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0 && stableRest) {
-    float vEnd = voltage;
-    float deltaSoc = socFromVoltage(calStartVoltage) - socFromVoltage(vEnd);
-    if (deltaSoc > 5.0) {
-      float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
-      if (estAh > CAPACITY_MIN && estAh < CAPACITY_MAX) {
-        float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
-        setCapacity(batteryCapacityAh * (1.0 - weight) + estAh * weight);
-        saveCapToEEPROM();
-      }
-    }
-    saveVcalToEEPROM();
-    calTarget = calCoulombs * 2.0;
-    calStartVoltage = vEnd;
-    calStartMs = now;
-    calCoulombs = 0;
-  }
-#endif
-}
-
-
-#if BAME_DEBUG
-void debugSerial() {
-  Serial.print(voltage, 2);
-  Serial.print(F(" V | "));
-  Serial.print(current, 2);
-  Serial.print(F(" A | "));
-  Serial.print(power, 1);
-  Serial.print(F(" W | SOC: "));
-  Serial.print(socPercent, 1);
-  Serial.print(F("% | Coulombs: "));
-  Serial.print(coulombCount, 0);
-  Serial.print(F("/"));
-  Serial.print(batteryCapacityAs, 0);
-  if (current > ACTIVE_CURRENT) {
-    float hoursLeft = (coulombCount / 3600.0) / current;
-    Serial.print(F(" | Left: "));
-    Serial.print(hoursLeft, 1);
-    Serial.print(F("h"));
-  }
-  Serial.println();
-}
+  vSlowAvg = vSlowAvg * 0.99f + voltage * 0.01f;
 #endif
 
-// ===========================================
-// Setup & Loop
-// ===========================================
+  // Periodic save so a power loss doesn't wipe the integrator
+  if ((now - lastEepromSaveMs) >= EEPROM_SAVE_INTERVAL_MS) {
+    saveCoulombEEPROM();
+    lastEepromSaveMs = now;
+  }
+}
 
+// ===========================================================================
+// Setup / loop
+// ===========================================================================
 void setup() {
-  #if BAME_DEBUG
+#if BAME_DEBUG
   Serial.begin(115200);
-  delay(500);
-  #endif
+  Serial.println(F("\nBaMe v" BAME_VERSION " (coulomb-only)"));
+#endif
+
   Wire.begin();
-  pinMode(KEY_PIN, INPUT);
-  pinMode(ACTION_BTN_PIN, INPUT_PULLUP);
-  computeThresholds(); // default thresholds
-
-  #if BAME_DEBUG
-  Serial.println(F(""));
-  Serial.println(F("========================="));
-  Serial.println(F(" BaMe Battery Meter"));
-  Serial.println(F(" LFP " BAME_VERSION));
-  Serial.println(F("========================="));
-
-  // Scan I2C
-  Serial.println(F("[I2C] Scan..."));
-  {
-    int found = 0;
-    for (byte addr = 1; addr < 127; addr++) {
-      Wire.beginTransmission(addr);
-      if (Wire.endTransmission() == 0) {
-        Serial.print(F("  0x"));
-        if (addr < 16) Serial.print(F("0"));
-        Serial.println(addr, HEX);
-        found++;
-      }
-    }
-    Serial.print(found);
-    Serial.println(F(" device(s)"));
-  }
-  #endif
-
-  // Init OLED
-  #if BAME_DEBUG
-  Serial.println(F("[OLED] Init..."));
-  #endif
-  bool oledOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  #if BAME_DEBUG
-  if (!oledOk) {
-    Serial.println(F("[OLED] ERROR - not found"));
-  } else {
-    Serial.println(F("[OLED] OK"));
-  }
-  #endif
-  if (oledOk) {
+  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
   }
+  ina.begin();
+  ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
+  ina.setAverage(4);
 
-  // Load keypad calibration from EEPROM
-  const char* btnNames[] = {"CENTER", "UP", "DOWN", "LEFT", "RIGHT"};
-  loadCalFromEEPROM();
-  computeThresholds();
+  pinMode(ACTION_BTN_PIN, INPUT_PULLUP);
+  loadKeypadEEPROM();
+  computeKeypadThresholds();
 
-  // Button held at boot -> diag/calibration mode
-  delay(200);
-  if (analogRead(KEY_PIN) < 1000) {
-    #define BOOT_CAL_MS 5000
-    unsigned long pressStart = millis();
-    bool calibrate = false;
-
-    // Gauge 0->100% over 5s
-    while (analogRead(KEY_PIN) < 1000) {
-      unsigned long held = millis() - pressStart;
-      float pct = (float)held * 100.0f / BOOT_CAL_MS;
-      if (pct > 100.0f) pct = 100.0f;
-
-      if (oledOk) {
-        display.clearDisplay();
-        gfx.drawGauge(pct, F("CAL"));
-        display.setTextSize(1);
-        display.setCursor(16, BLUE_Y + 9);
-        display.print(F("Hold = calibrate"));
-        display.display();
-      }
-
-      if (held >= BOOT_CAL_MS) {
-        calibrate = true;
-        break;
-      }
-      delay(50);
-    }
-    waitButtonRelease();
-
-    if (calibrate) {
-      // Keypad calibration
-      delay(300);
-      for (int b = 0; b < CAL_BTN_COUNT; b++) {
-        int stableMin = 1023;
-        bool pressed = false;
-        bool done = false;
-
-        while (!done) {
-          int val = analogRead(KEY_PIN);
-          if (val < 1000) {
-            if (val < stableMin) stableMin = val;
-            pressed = true;
-          } else if (pressed) {
-            keyCalVals[b] = stableMin;
-            done = true;
-          }
-
-          if (oledOk) {
-            display.clearDisplay();
-            gfx.drawTitle(F("CALIBRATION"));
-            display.setTextSize(2);
-            display.setCursor(0, BLUE_Y + 2);
-            display.println(btnNames[b]);
-            display.setTextSize(1);
-            display.setCursor(0, BLUE_Y + 22);
-            display.print(F("ADC: "));
-            display.print(val);
-            if (pressed) {
-              display.print(F("  min:"));
-              display.print(stableMin);
-            }
-            display.display();
-          }
-          delay(50);
-        }
-        delay(300);
-      }
-
-      saveCalToEEPROM();
-      computeThresholds();
-
-      if (oledOk) {
-        display.clearDisplay();
-        gfx.drawTitle(F("CAL OK"));
-        display.setTextSize(1);
-        display.setCursor(0, BLUE_Y + 2);
-        for (int i = 0; i < CAL_BTN_COUNT; i++) {
-          display.print(btnNames[i]);
-          display.print(F(": "));
-          display.println(keyCalVals[i]);
-        }
-        display.display();
-        delay(2000);
-      }
-    } else {
-      // Short press -> settings menu
-      settingsMenu();
-    }
+  // Persistent state. Order matters: nom first (sets default cap), then
+  // learned (overrides), then coulomb running total.
+  float v;
+  if (loadFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_VAL, EEPROM_NOM_DATA_ADDR, v)
+      && v >= CAPACITY_MIN && v <= CAPACITY_MAX) {
+    batteryCapacityNom = v;
+  }
+  setCapacityNom(batteryCapacityNom);
+  if (loadFloatEEPROM(EEPROM_LEARN_MAGIC_ADDR, EEPROM_LEARN_VAL, EEPROM_LEARN_DATA_ADDR, v)
+      && v >= CAPACITY_MIN && v <= CAPACITY_MAX) {
+    batteryCapacityAh = v;
+    capacityLearned = true;
+  }
+  if (!loadFloatEEPROM(EEPROM_COULOMB_MAGIC_ADDR, EEPROM_COULOMB_VAL,
+                       EEPROM_COULOMB_DATA_ADDR, coulombCount)) {
+    coulombCount = capacityAs();
+    socUncertain = true;
   }
 
-  // Load cell count first (affects voltage defaults)
-  // Cell count comes from BAME_CELLS at compile time — no EEPROM load.
-  vbatTop = cellCount * LFP_CELL_FULL;
-  vbatBottom = cellCount * LFP_CELL_EMPTY;
-
-  // Load voltage calibration from EEPROM
-  if (loadVcalFromEEPROM()) {
-    #if BAME_DEBUG
-    Serial.println(F("[VCAL] EEPROM loaded"));
-    Serial.print(F("  Vmax=")); Serial.print(vbatTop, 2);
-    Serial.print(F("  Vmin=")); Serial.println(vbatBottom, 2);
-    #endif
-  } else {
-    #if BAME_DEBUG
-    Serial.println(F("[VCAL] Using defaults"));
-    #endif
-  }
-
-  // Load learned capacity
-  loadNomFromEEPROM();  // nominal first (fallback)
-  if (!loadCapFromEEPROM()) {
-    // No calibration -> fallback to nominal
-    setCapacity(batteryCapacityNom);
-  }
-#if !BAME_DEV
-  loadAutoSleepFromEEPROM();
-#endif
-  // calCoulombs resets to 0 on each boot (fresh segment)
-
-  // Init INA226
-  bool inaOk = ina.begin();
-  if (!inaOk) {
-    #if BAME_DEBUG
-    Serial.println(F("[INA226] ERROR - not found"));
-    #endif
-  } else {
-    #if BAME_DEBUG
-    Serial.println(F("[INA226] OK"));
-    #endif
-    ina.setMaxCurrentShunt(MAX_CURRENT, SHUNT_RESISTANCE);
-    ina.setAverage(16);
-  }
-
-  // SOC initial
-  delay(500);
-  if (inaOk) {
-    voltage = ina.getBusVoltage();
-    socPercent = socFromVoltage(voltage);
-    coulombCount = (socPercent / 100.0) * batteryCapacityAs;
-  }
-
-  #if BAME_DEBUG
-  Serial.println(F("--- Start ---"));
-  #endif
   lastMeasure = millis();
-  lastInteraction = millis();
+  lastEepromSaveMs = millis();
 }
 
 void loop() {
   unsigned long now = millis();
-
-  // Button handling
-  Button b = readButton();
-  if (b != BTN_NONE) {
-#if !BAME_DEV
-    if (oledSleeping) {
-      waitButtonRelease();
-      exitOledSleep();
-    } else
-#endif
-    if (b == BTN_CENTER) {
-      checkLongPress();
-    }
-    lastInteraction = millis();
-  }
-
-#if !BAME_DEV
-  // Screen auto-sleep after 60s
-  if (!oledSleeping && (millis() - lastInteraction >= AUTO_SLEEP_MS)) {
-    enterOledSleep();
-  }
-  // Auto deep sleep after 5min
-  if (autoDeepSleep && (millis() - lastInteraction >= AUTO_DEEPSLEEP_MS)) {
-    enterDeepSleep();
-    lastMeasure = millis();
-    lastInteraction = millis();
-  }
-#endif
-
-  if (now - lastMeasure >= MEASURE_INTERVAL_MS) {
+  if ((now - lastMeasure) >= MEASURE_INTERVAL_MS) {
     updateMeasurements();
   }
-
-  if (!oledSleeping && now - lastDisplay >= DISPLAY_INTERVAL_MS) {
-    lastDisplay = now;
-    gfx.tick();
+  if ((now - lastDisplay) >= DISPLAY_INTERVAL_MS) {
     updateDisplay();
-    #if BAME_DEBUG
-    debugSerial();
-    #endif
+    lastDisplay = now;
+  }
+
+  // Long-press CENTER (≥ 500 ms) opens the settings menu.
+  if (readButton() == BTN_CENTER) {
+    unsigned long pressStart = millis();
+    while (readButton() == BTN_CENTER) {
+      if (millis() - pressStart >= 500) {
+        waitButtonRelease();
+        settingsMenu();
+        break;
+      }
+      delay(20);
+    }
   }
 }

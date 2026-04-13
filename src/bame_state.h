@@ -1,86 +1,63 @@
-// Shared global state — declarations only. Definitions live in main.cpp so
-// the v1 split stays mechanical (no behavior change vs single-file build).
+// Shared state for BaMe v2 (pure coulomb counting, no voltage SOC).
+// Globals are defined in main.cpp; modules read them via these externs.
 #pragma once
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <INA226.h>
 #include "BameGFX.h"
 
-// Hardware objects
+// --- Hardware objects ---
 extern Adafruit_SSD1306 display;
 extern BameGFX gfx;
 extern INA226 ina;
 
-// Battery / capacity
+// --- Cell count (compile-time, BAME_CELLS in platformio.ini) ---
 extern const uint8_t cellCount;
-extern float vbatTop;
-extern float vbatBottom;
-extern float vMinUtile;
-extern float vMaxUtile;
-extern float batteryCapacityNom;
-extern float batteryCapacityAh;
-extern float batteryCapacityAs;
 
-// Live measurements
+// --- Battery capacity ---
+extern float batteryCapacityNom;   // user "sticker value", reset target
+extern float batteryCapacityAh;    // learned (or nom if not yet learned)
+extern bool  capacityLearned;      // true after at least one full→cutoff cycle
+
+// --- Live measurements ---
 extern float voltage;
-extern float current;
-extern float power;
-extern float socPercent;
-extern float coulombCount;
-extern float coulombRaw;
+extern float current;              // INA reading minus offset, dead-band applied
+extern float power;                // INA-reported power
 extern float currentOffset;
-extern float cAvg;
-extern float maxSliceI;
-extern float bufMin;
+extern float cAvg;                 // EWMA-smoothed current (display only)
+extern bool  cAvgInit;
 
-// Trend / charge / chrono
-extern bool externalChargeDetected;
-extern int8_t voltageTrend;
-#if BAME_DEV
-extern unsigned long flatSince;
-#endif
+// --- SOC integrator (single source of truth) ---
+extern float coulombCount;
+extern bool  socUncertain;         // LOAD mode: true after invisible partial charge
 
-// Calibration segment state
-extern float calCoulombs;
-extern float calChargeSec;
-extern float calTarget;
-extern float calStartVoltage;
-extern unsigned long calStartMs;
-#if BAME_DEV
-extern float pendingEndVoltage;
-extern float pendingEndCoulombs;
-extern unsigned long pendingEndMs;
-#endif
+// --- Battery presence + cycle bookkeeping ---
+extern bool  batteryPresent;
+extern float coulombsAtLastFull;   // coulombCount value at the last full event
+extern unsigned long sinceLastFullMs;
 
-// Sleep / interaction
-#if !BAME_DEV
-extern bool autoDeepSleep;
-extern bool oledSleeping;
-extern unsigned long lastInteraction;
-#else
-#define autoDeepSleep false
-#endif
-
-// Loop pacing
+// --- Loop pacing ---
 extern unsigned long lastMeasure;
 extern unsigned long lastDisplay;
 
-// Buttons
+// --- Buttons ---
 enum Button { BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_CENTER };
 Button readButton();
 Button readButtonDebounced();
-void waitButtonRelease();
+void   waitButtonRelease();
 
-// EEPROM helpers (defined in main.cpp)
-void saveNomToEEPROM();
-void saveVcalToEEPROM();
-void saveCapToEEPROM();
-void resetCapEEPROM();
-#if !BAME_DEV
-void saveAutoSleepToEEPROM();
-#endif
+// --- EEPROM helpers (defined in main.cpp) ---
+void saveNomEEPROM();
+void saveLearnedEEPROM();
+void saveCoulombEEPROM();
+void resetAllEEPROM();
 
-// Capacity setter
-void setCapacity(float ah);
-void resetCalibration();
-float socFromVoltage(float v);
+// --- Capacity / event helpers (defined in main.cpp) ---
+inline float capacityAs() { return batteryCapacityAh * 3600.0f; }
+inline float socPercent() {
+  float as = capacityAs();
+  if (as <= 0) return 0;
+  return constrain(coulombCount / as * 100.0f, 0.0f, 100.0f);
+}
+void setCapacityNom(float ah);
+void declareBatteryFull(unsigned long now);

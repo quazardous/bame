@@ -2,22 +2,19 @@
 #include "display.h"
 #include "bame_state.h"
 
-// Constants reused from the original main.cpp. Duplicated here verbatim so
-// the split is mechanical — moving them into a config.h is the next step.
-#define MIN_BATTERY_V       1.0
-#define ACTIVE_CURRENT      0.5
-#define LFP_CELL_CHARGE     3.40
-#define DISPLAY_INTERVAL_MS 500
-#define FLAT_COUNTDOWN_MS   60000UL
-#define CAL_INITIAL_TIME_MS 120000
-#define CAL_MIN_COULOMBS    500.0
+// v2 layout: gauge, big Ah + V, watts (smoothed) + raw current, HH:MM or
+// capacity at rest. A '?' next to Ah marks SOC uncertainty (LOAD-mode
+// invisible partial charge); a '*' next to capacity marks "not yet learned".
+
+#define MIN_BATTERY_V       1.0f
+#define ACTIVE_CURRENT      0.5f
+#define LFP_CELL_TOP_REST   3.40f
 
 
 void updateDisplay() {
   display.clearDisplay();
 
-  // No battery detected
-  if (voltage < MIN_BATTERY_V) {
+  if (!batteryPresent) {
     gfx.drawGauge(0);
     display.setTextSize(2);
     display.setCursor(4, BLUE_Y + 12);
@@ -26,58 +23,36 @@ void updateDisplay() {
     return;
   }
 
-  // === YELLOW ZONE (0-15): SOC gauge with XOR sprites ===
-  gfx.drawGauge(socPercent);
+  float soc = socPercent();
+  gfx.drawGauge(soc);
 
-  // === BLUE ZONE (16-63) ===
-
-  // Line 1: Remaining Ah (left) + Voltage (right)
+  // Line 1: Ah (left, big) + voltage (right, big), with '?' if uncertain.
   int ahInt = (int)(coulombCount / 3600.0);
+  if (ahInt < 0) ahInt = 0;
   uint8_t ahDigits = (ahInt >= 100) ? 3 : (ahInt >= 10) ? 2 : 1;
-  // Size 2 pass: both big numbers
   display.setTextSize(2);
   display.setCursor(0, BLUE_Y + 2);
   display.print(ahInt);
   display.setCursor(SCREEN_W - 54, BLUE_Y + 2);
   display.print(voltage, 1);
-  // Everything after this is size 1 (suffixes, countdown, line 2, line 3).
   display.setTextSize(1);
   display.setCursor(ahDigits * 12, BLUE_Y + 2);
   display.print(F("Ah"));
+  if (socUncertain) {
+    display.setCursor(ahDigits * 12, BLUE_Y + 10);
+    display.print('?');
+  }
   display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
   display.print(F("V"));
-  // Voltage trend arrow (left of voltage). In dev, also shows 60→0 chrono
-  // countdown while flat (flatSince is maintained by updateMeasurements).
-  {
-    int16_t ax = SCREEN_W - 66;
-    int16_t ay = BLUE_Y + 6;
-    if (voltageTrend > 0)
-      display.fillTriangle(ax, ay + 6, ax + 4, ay, ax + 8, ay + 6, SSD1306_WHITE);
-    else if (voltageTrend < 0)
-      display.fillTriangle(ax, ay, ax + 8, ay, ax + 4, ay + 6, SSD1306_WHITE);
-#if BAME_DEV
-    else if (bufMin > 0) {
-      uint32_t elapsed_ms = millis() - flatSince;
-      if (elapsed_ms < FLAT_COUNTDOWN_MS) {
-        uint8_t remaining = (FLAT_COUNTDOWN_MS / 1000) - (uint8_t)(elapsed_ms / 1000);
-        display.setCursor(remaining < 10 ? ax + 2 : ax - 4, ay);
-        display.print(remaining);
-      }
-    }
-#endif
-  }
 
-  // Line 2: Power (smoothed when buffer full) + instantaneous current
-  // Power uses cAvg × voltage once we have it — averages out cyclic loads.
-  // Current shown as-is (raw A for live feedback).
-  float iForPower = (bufMin > 0) ? cAvg : current;
+  // Line 2: power (smoothed) + raw current
+  float iForPower = cAvgInit ? cAvg : current;
   display.setCursor(0, BLUE_Y + 22);
   display.print((int)abs(iForPower * voltage));
   display.print(F("W"));
-  // Amps right-aligned
   {
     int ci = (int)abs(current);
-    uint8_t alen = 4; // "X.XA" minimum
+    uint8_t alen = 4;
     if (ci >= 10) alen++;
     if (ci >= 100) alen++;
     if (current < 0) alen++;
@@ -86,64 +61,48 @@ void updateDisplay() {
     display.print(F("A"));
   }
 
-  // Line 3: Arrow + time remaining
-  // Use smoothed cAvg when buffer full — cyclic loads average out, autonomy
-  // stops oscillating between "hours" and "infinity" as compressor cycles.
+  // Line 3: HH:MM remaining (active) or capacity (at rest)
   int16_t ty = BLUE_Y + 37;
-  float iForAutonomy = (bufMin > 0) ? cAvg : current;
-  float hoursLeft = 0;
-  if (iForAutonomy > ACTIVE_CURRENT) {
-    hoursLeft = (coulombCount / 3600.0) / iForAutonomy;
-  } else if (iForAutonomy < -ACTIVE_CURRENT) {
-    float remaining = (batteryCapacityAs - coulombCount) / 3600.0;
-    if (remaining < 0) remaining = 0;
-    hoursLeft = remaining / (-iForAutonomy);
-  }
-
-  // Bottom left line: either HH:MM (active current) or capacity (at rest)
-  if (abs(current) > ACTIVE_CURRENT) {
+  float iAuto = cAvgInit ? cAvg : current;
+  if (iAuto > ACTIVE_CURRENT) {
+    float hoursLeft = (coulombCount / 3600.0) / iAuto;
     hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
     int h = (int)hoursLeft;
     int m = (int)((hoursLeft - h) * 60);
-    // Triangle: < discharge, > charge
-    if (current > 0) display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
-    else             display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
+    display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
     display.setCursor(10, ty);
     if (h < 10) display.print('0');
     display.print(h);
     display.print(':');
     if (m < 10) display.print('0');
     display.print(m);
-  } else if (!autoDeepSleep) {
-    // At rest: show estimated capacity
+  } else if (iAuto < -ACTIVE_CURRENT) {
+    float remaining = (capacityAs() - coulombCount) / 3600.0f;
+    if (remaining < 0) remaining = 0;
+    float hoursLeft = remaining / (-iAuto);
+    hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
+    int h = (int)hoursLeft;
+    int m = (int)((hoursLeft - h) * 60);
+    display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
+    display.setCursor(10, ty);
+    if (h < 10) display.print('0');
+    display.print(h);
+    display.print(':');
+    if (m < 10) display.print('0');
+    display.print(m);
+  } else {
     display.setCursor(0, ty);
     display.print((int)batteryCapacityAh);
     display.print(F("Ah"));
-  }
-
-#if BAME_DEV
-  // Calibration counter (dev only, flash-heavy): blinks waiting for stable rest.
-  if (!autoDeepSleep) {
-    bool needsRest = (calStartVoltage == 0)
-      || ((calTarget > 0) ? (calCoulombs >= calTarget)
-      : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
-    bool blink = (millis() / DISPLAY_INTERVAL_MS) % 2;
-    if (!needsRest || blink) {
-      display.setCursor(50, ty);
-      float calAh = calCoulombs / 3600.0;
-      if (calAh >= 10.0) display.print((int)calAh);
-      else display.print(calAh, 1);
-      display.print(F("Ah"));
+    if (!capacityLearned) {
+      display.setCursor(28, ty);
+      display.print('*');
     }
   }
-#endif
 
-  // Bottom right: battery icon — charging (partial, blinking) or full (static)
-  if (externalChargeDetected) {
-    if ((millis() / DISPLAY_INTERVAL_MS) % 2)
-      gfx.drawChargingBattery(106, ty, false);  // partial, blinks
-  } else if (voltage >= cellCount * LFP_CELL_CHARGE) {
-    gfx.drawChargingBattery(106, ty, true);     // full, static
+  // Bottom right: charging icon when voltage is at top OCV (post-charge state)
+  if ((voltage / cellCount) >= LFP_CELL_TOP_REST) {
+    gfx.drawChargingBattery(106, ty, true);
   }
 
   display.display();

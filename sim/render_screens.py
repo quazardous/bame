@@ -327,36 +327,30 @@ def screen_no_battery(d):
 # Settings menu (prod build) — src/main.cpp:576 settingsMenu().
 # Items: Capacity, Cells, V min, V max, Eco mode, Reset ALL, Info V (last, read-only).
 # ITEM_INFO_V is an inline row drawn at src/main.cpp:595-612 (not a drawMenuItem).
-def _draw_info_row(d, row, voltage, vmin, selected=False):
+def _draw_info_row(d, row, voltage, soc_pct, selected=False):
     y = BLUE_Y + row * 8
     if selected:
         d.fill_rect(0, y, W, 8)
-    vmin_str = f"{vmin:.2f}" if vmin > 0 else "-"
-    d.text(0, y, f"{voltage:.2f}V min:{vmin_str}", inverse=selected)
+    d.text(0, y, f"{voltage:.2f}V {int(soc_pct)}%", inverse=selected)
 
 
+# v2 menu (src/menu.cpp): Capacity, Battery full, Reset ALL, Info V (read-only)
 def screen_menu(d):
     d.clear()
-    draw_title(d, "Bame v2.0")  # src/main.cpp:593
+    draw_title(d, "Bame v2.0")
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
-    draw_menu_item(d, 1, ' ', 'Cells', '4S')
-    draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
-    draw_menu_item(d, 3, ' ', 'V max', '13.6V')
-    draw_menu_item(d, 4, ' ', 'Eco mode', 'OFF')
-    draw_menu_item(d, 5, ' ', 'Reset ALL')
-    _draw_info_row(d, 6, voltage=13.28, vmin=12.81)
+    draw_menu_item(d, 1, ' ', 'Battery full')
+    draw_menu_item(d, 2, ' ', 'Reset ALL')
+    _draw_info_row(d, 3, voltage=13.28, soc_pct=64)
 
 
 def screen_menu_edit(d):
     d.clear()
     draw_title(d, "Bame v2.0")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
-    draw_menu_item(d, 1, ' ', 'Cells', '4S')
-    draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
-    draw_menu_item(d, 3, ' ', 'V max', '13.6V')
-    draw_menu_item(d, 4, ' ', 'Eco mode', 'OFF')
-    draw_menu_item(d, 5, ' ', 'Reset ALL')
-    _draw_info_row(d, 6, voltage=13.28, vmin=12.81)
+    draw_menu_item(d, 1, ' ', 'Battery full')
+    draw_menu_item(d, 2, ' ', 'Reset ALL')
+    _draw_info_row(d, 3, voltage=13.28, soc_pct=64)
 
 
 SCREENS = {
