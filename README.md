@@ -1,5 +1,7 @@
 # BaMe - Battery Meter
 
+> **Want to build & flash your own?** → [QUICKSTART.md](QUICKSTART.md)
+
 A small, unambitious side project to put repurposed "dumb" golf-cart LiFePO4 batteries to work in a camping van. No BMS, no data interface, no datasheet — just a cheap pack of cells and a sticker with a capacity that's probably optimistic.
 
 Yes, buying a proper modern battery with its own BMS and bluetooth app would do this better. But it's more fun to poke at the problem with an Arduino, an INA226 shunt and a small OLED than to click "add to cart". If you like that kind of thing, this is that kind of thing.

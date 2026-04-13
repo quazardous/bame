@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.17"
+#define BAME_VERSION "1.18"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -34,7 +34,25 @@
 #define ACTION_BTN_PIN 2
 
 // LiFePO4 battery
-#define LFP_CELL_DEFAULT    4
+// Cell count is a compile-time constant (BAME_CELLS in platformio.ini).
+// It's a physical install decision — the count never changes for a given
+// hardware setup, so there's no menu item or EEPROM byte for it anymore.
+#ifndef BAME_CELLS
+  #define BAME_CELLS 4
+#endif
+#define LFP_CELL_DEFAULT    BAME_CELLS
+
+// Charge detection wiring (BAME_WIRING_BUS in platformio.ini):
+//   1 → BUS  : BaMe sits on the battery bus — every load AND charge current
+//              goes through the INA226 shunt. Charge is detected by sustained
+//              negative current.
+//   0 → LOAD : BaMe sits on the load branch only — the charger is wired
+//              directly to the battery, bypassing the shunt. We never see
+//              charge current, so charge has to be inferred from voltage
+//              trend with a guard against the LFP rebound after a load.
+#ifndef BAME_WIRING_BUS
+  #define BAME_WIRING_BUS 1
+#endif
 #define LFP_CELL_FULL       3.65
 #define LFP_CELL_EMPTY      2.50
 #define BATTERY_CAPACITY_AH 80.0
@@ -118,14 +136,16 @@
 #define EEPROM_NOM_MAGIC_VAL  0xDD
 
 // EEPROM layout for cell count (addr 31)
-#define EEPROM_CELLS_ADDR 31  // 1 byte: cell count (0xFF = default)
+// EEPROM addr 31 was cell count — now compile-time (BAME_CELLS), addr free.
 
 // EEPROM layout for auto deep sleep
 #define EEPROM_ASLEEP_ADDR        36  // 1 byte: 0x01 = active
 
 
 // Cell count and dynamic voltages
-uint8_t cellCount = LFP_CELL_DEFAULT;
+// cellCount is fixed at compile time via BAME_CELLS; kept as a const for
+// readability since most call sites refer to it.
+const uint8_t cellCount = BAME_CELLS;
 float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;    // calibration window upper bound
 float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY; // calibration window lower bound
 
@@ -429,12 +449,6 @@ void resetCapEEPROM() {
   calStartMs = 0;
 }
 
-void saveCellsToEEPROM() { EEPROM.write(EEPROM_CELLS_ADDR, cellCount); }
-void loadCellsFromEEPROM() {
-  uint8_t v = EEPROM.read(EEPROM_CELLS_ADDR);
-  if (v >= 1 && v <= 16) cellCount = v;
-}
-
 #if !BAME_DEV
 void saveAutoSleepToEEPROM() { EEPROM.write(EEPROM_ASLEEP_ADDR, autoDeepSleep ? 0x01 : 0x00); }
 void loadAutoSleepFromEEPROM() { autoDeepSleep = (EEPROM.read(EEPROM_ASLEEP_ADDR) == 0x01); }
@@ -577,7 +591,6 @@ float socFromVoltage(float v) {
 // --- SYSTEM menu (flat) ---
 enum MenuItem {
   ITEM_CAP,
-  ITEM_CELLS,
 #if !BAME_DEV
   ITEM_VMIN,
   ITEM_VMAX,
@@ -593,7 +606,6 @@ void settingsMenu() {
   int8_t editing = -1;
 
   float tmpCap = batteryCapacityNom;
-  uint8_t tmpCells = cellCount;
 #if !BAME_DEV
   float tmpVmin = vMinUtile;
   float tmpVmax = vMaxUtile;
@@ -633,11 +645,6 @@ void settingsMenu() {
     strcat(buf, "Ah");
     gfx.drawMenuItem(ITEM_CAP, ' ', F("Capacity"), buf, sel == ITEM_CAP, editing == ITEM_CAP);
 
-    // Cells
-    itoa(editing == ITEM_CELLS ? tmpCells : cellCount, buf, 10);
-    strcat(buf, "S");
-    gfx.drawMenuItem(ITEM_CELLS, ' ', F("Cells"), buf, sel == ITEM_CELLS, editing == ITEM_CELLS);
-
 #if !BAME_DEV
     // V min utile (with observed min appended)
     dtostrf(editing == ITEM_VMIN ? tmpVmin : vMinUtile, 0, 1, buf);
@@ -675,24 +682,18 @@ void settingsMenu() {
       switch (b) {
         case BTN_UP:
           if (editing == ITEM_CAP) { tmpCap += 1; if (tmpCap > CAPACITY_MAX) tmpCap = CAPACITY_MAX; }
-          else if (editing == ITEM_CELLS) { tmpCells += 1; if (tmpCells > 16) tmpCells = 16; }
 #if !BAME_DEV
           else if (editing == ITEM_VMIN) { tmpVmin += 0.05; if (tmpVmin > cellCount * LFP_CELL_CHARGE) tmpVmin = cellCount * LFP_CELL_CHARGE; }
           else if (editing == ITEM_VMAX) { tmpVmax += 0.05; if (tmpVmax > cellCount * LFP_CELL_FULL) tmpVmax = cellCount * LFP_CELL_FULL; }
-#endif
-#if !BAME_DEV
           else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
 #endif
           else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
           break;
         case BTN_DOWN:
           if (editing == ITEM_CAP) { tmpCap -= 1; if (tmpCap < CAPACITY_MIN) tmpCap = CAPACITY_MIN; }
-          else if (editing == ITEM_CELLS) { tmpCells -= 1; if (tmpCells < 1) tmpCells = 1; }
 #if !BAME_DEV
           else if (editing == ITEM_VMIN) { tmpVmin -= 0.05; if (tmpVmin < cellCount * LFP_CELL_EMPTY) tmpVmin = cellCount * LFP_CELL_EMPTY; }
           else if (editing == ITEM_VMAX) { tmpVmax -= 0.05; if (tmpVmax < cellCount * LFP_CELL_CHARGE) tmpVmax = cellCount * LFP_CELL_CHARGE; }
-#endif
-#if !BAME_DEV
           else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
 #endif
           else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
@@ -703,12 +704,6 @@ void settingsMenu() {
             saveNomToEEPROM();
             setCapacity(batteryCapacityNom);
             saveCapToEEPROM();
-          } else if (editing == ITEM_CELLS) {
-            cellCount = tmpCells;
-            saveCellsToEEPROM();
-            vbatTop = cellCount * LFP_CELL_FULL;
-            vbatBottom = cellCount * LFP_CELL_EMPTY;
-            saveVcalToEEPROM();
           }
 #if !BAME_DEV
           else if (editing == ITEM_VMIN) {
@@ -736,7 +731,6 @@ void settingsMenu() {
           break;
         case BTN_LEFT:
           tmpCap = batteryCapacityNom;
-          tmpCells = cellCount;
 #if !BAME_DEV
           tmpVmin = vMinUtile;
           tmpVmax = vMaxUtile;
@@ -755,7 +749,6 @@ void settingsMenu() {
           if (sel == ITEM_INFO_V) break;  // info item: no action
           editing = sel;
           tmpCap = batteryCapacityNom;
-          tmpCells = cellCount;
 #if !BAME_DEV
           tmpVmin = vMinUtile;
           tmpVmax = vMaxUtile;
@@ -899,11 +892,24 @@ void updateMeasurements() {
       float slopeV = ((float)VHIST_SIZE * sumIY - (float)VHIST_SX * sumY) / (float)VHIST_D;
       voltageTrend = (slopeV > VHIST_SLOPE_THRESHOLD) ? 1
                    : (slopeV < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
-      if (voltageTrend > 0) externalChargeDetected = true;
-      else if (voltageTrend < 0) externalChargeDetected = false;
     }
-    // Below 3.375V/cell a charger cannot be active (it imposes higher voltage)
-    if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;
+#if BAME_WIRING_BUS
+    // BUS install: every current goes through the shunt — current sense is
+    // the unambiguous signal. Voltage trend stays only as a UI cue (arrow /
+    // chrono), not gated on charge detection.
+    externalChargeDetected = (current <= -VBAT_CHARGE_CURRENT
+                              && calChargeSec >= 5.0);
+#else
+    // LOAD install: charger is upstream of the shunt, so we never see
+    // negative current. Detect charge purely from voltage trend, with the
+    // LFP_CELL_CHARGE_MIN guard rejecting the post-load rebound (voltage
+    // rises briefly then settles — looks like a charge but isn't).
+    if (voltageTrend > 0) externalChargeDetected = true;
+    else if (voltageTrend < 0) externalChargeDetected = false;
+    if (voltage < cellCount * LFP_CELL_CHARGE_MIN) {
+      externalChargeDetected = false;
+    }
+#endif
 
     if (externalChargeDetected) resetCalibration();
 
@@ -1381,7 +1387,7 @@ void setup() {
   }
 
   // Load cell count first (affects voltage defaults)
-  loadCellsFromEEPROM();
+  // Cell count comes from BAME_CELLS at compile time — no EEPROM load.
   vbatTop = cellCount * LFP_CELL_FULL;
   vbatBottom = cellCount * LFP_CELL_EMPTY;
 

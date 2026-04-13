@@ -1,467 +1,155 @@
 #!/usr/bin/env python3
 """
-BaMe Calibration Simulator
+Capacity-calibration end-to-end simulation.
 
-Simulates a LFP battery with known true capacity and runs the exact same
-calibration algorithm as the firmware to validate convergence.
+Drives `_firmware.FirmwareMirror` against a `_battery.Battery` with a
+known true capacity, using a load profile from `_scenarios`. Prints one
+line per calibration event (open / preempt / commit / rollback) and a
+final summary of how close the estimate got to the truth.
+
+Use it to test "battery configured wrong" cases:
+  --true-capacity 50 --nominal-capacity 80
+  --true-cell-full 3.55  (real pack tops at 3.55, not 3.65)
+  --user-vmin-utile 11.5 (user typed wrong)
 
 Usage:
-    python calibration_sim.py [--capacity 50] [--nominal 80] [--cells 4]
-                              [--noise 0.01] [--scenario mixed]
+    python sim/calibration_sim.py [--scenario mixed] [--true-capacity 50]
+                                  [--nominal-capacity 80] [--cells 4]
 """
 
 import argparse
 import random
-import math
-
-# ============================================================
-# LFP per-cell SOC curve (same as firmware)
-# ============================================================
-SOC_CURVE = [
-    (3.65, 100), (3.40, 99), (3.35, 90), (3.325, 70),
-    (3.30, 40), (3.275, 30), (3.25, 20), (3.20, 17),
-    (3.00, 14), (2.75, 9), (2.50, 0),
-]
-
-
-def soc_from_voltage_percell(v_cell):
-    """SOC% from per-cell voltage using the LFP curve."""
-    if v_cell >= SOC_CURVE[0][0]:
-        return 100.0
-    if v_cell <= SOC_CURVE[-1][0]:
-        return 0.0
-    for i in range(len(SOC_CURVE) - 1):
-        if v_cell >= SOC_CURVE[i + 1][0]:
-            ratio = (v_cell - SOC_CURVE[i + 1][0]) / (SOC_CURVE[i][0] - SOC_CURVE[i + 1][0])
-            return SOC_CURVE[i + 1][1] + ratio * (SOC_CURVE[i][1] - SOC_CURVE[i + 1][1])
-    return 0.0
-
-
-def voltage_from_soc_percell(soc):
-    """Per-cell voltage from SOC% (reverse lookup with interpolation)."""
-    if soc >= 100:
-        return SOC_CURVE[0][0]
-    if soc <= 0:
-        return SOC_CURVE[-1][0]
-    for i in range(len(SOC_CURVE) - 1):
-        if soc >= SOC_CURVE[i + 1][1]:
-            ratio = (soc - SOC_CURVE[i + 1][1]) / (SOC_CURVE[i][1] - SOC_CURVE[i + 1][1])
-            return SOC_CURVE[i + 1][0] + ratio * (SOC_CURVE[i][0] - SOC_CURVE[i + 1][0])
-    return SOC_CURVE[-1][0]
-
-
-# ============================================================
-# Battery model
-# ============================================================
-class Battery:
-    """Simulates a LFP battery pack with known true capacity."""
-
-    def __init__(self, true_capacity_ah, cells, voltage_noise=0.01, current_noise=0.005):
-        self.true_capacity_ah = true_capacity_ah
-        self.true_capacity_as = true_capacity_ah * 3600.0
-        self.cells = cells
-        self.voltage_noise = voltage_noise  # V per cell
-        self.current_noise = current_noise  # A
-        self.coulombs_remaining = self.true_capacity_as * 0.75  # start at 75%
-        self.internal_resistance = 0.005 * cells  # ~5mOhm per cell
-
-    @property
-    def true_soc(self):
-        return (self.coulombs_remaining / self.true_capacity_as) * 100.0
-
-    def ocv(self):
-        """Open-circuit voltage (no load, no noise)."""
-        soc = self.true_soc
-        return voltage_from_soc_percell(soc) * self.cells
-
-    def read_voltage(self, current=0):
-        """Voltage under load with noise."""
-        v = self.ocv() - current * self.internal_resistance
-        v += random.gauss(0, self.voltage_noise * self.cells)
-        return v
-
-    def read_current(self, true_current):
-        """Current with INA226-like noise + offset."""
-        return true_current + random.gauss(0, self.current_noise) + 0.004  # 4mA offset
-
-    def discharge(self, current, dt_seconds):
-        """Apply discharge (current > 0) or charge (current < 0)."""
-        self.coulombs_remaining -= current * dt_seconds
-        self.coulombs_remaining = max(0, min(self.true_capacity_as, self.coulombs_remaining))
-
-
-# ============================================================
-# Firmware calibration algorithm (replicated from main.cpp)
-# ============================================================
-class CalibrationState:
-    """Replicates the firmware calibration state machine."""
-
-    CAL_INITIAL_TIME_S = 60  # 1 min
-    CAL_MIN_COULOMBS = 500.0
-    REST_CURRENT = 0.3
-    CHARGE_CURRENT = 1.0
-    REST_STABLE_S = 5.0
-    CONVERGE_FAST = 0.01
-    CONVERGE_SLOW = 0.001
-
-    def __init__(self, nominal_ah, cells):
-        self.cells = cells
-        # Capacity
-        self.nominal_ah = nominal_ah
-        self.estimated_ah = nominal_ah
-        self.estimated_as = nominal_ah * 3600.0
-        self.capacity_trusted = False
-        # Calibration segment
-        self.cal_coulombs = 0
-        self.cal_target = 0
-        self.cal_start_voltage = 0
-        self.cal_start_time = 0
-        self.cal_charge_sec = 0
-        self.cal_last_delta_soc = 0
-        # Voltage calibration
-        self.vbat_max = cells * 3.65
-        self.vbat_min = cells * 2.50
-        # Current offset
-        self.current_offset = 0
-        # SOC
-        self.soc_percent = 50.0
-        self.coulomb_count = nominal_ah * 3600.0 * 0.5  # start at 50%
-        # Rest
-        self.rest_since = None
-        # Auto deep sleep
-        self.auto_deep_sleep = False
-        # History
-        self.estimates = []
-        self.log = []
-
-    def soc_from_voltage(self, v):
-        """Same as firmware socFromVoltage."""
-        v_cell = v / self.cells
-        v_min_cell = self.vbat_min / self.cells
-        v_max_cell = self.vbat_max / self.cells
-        if v_max_cell == v_min_cell:
-            return 50.0
-        v_scaled = 2.50 + (v_cell - v_min_cell) / (v_max_cell - v_min_cell) * (3.65 - 2.50)
-        return soc_from_voltage_percell(v_scaled)
-
-    def update(self, voltage, current_raw, dt, time_s):
-        """One measurement cycle (replicates updateMeasurements)."""
-        # Apply current offset
-        current = current_raw - self.current_offset
-        if abs(current) < 0.05:
-            current = 0  # dead band
-
-        # Coulomb counting
-        self.coulomb_count -= current * dt
-        self.coulomb_count = max(0, min(self.estimated_as, self.coulomb_count))
-        self.soc_percent = (self.coulomb_count / self.estimated_as) * 100.0
-
-        # Calibration accumulation
-        if current > 0:
-            self.cal_coulombs += current * dt
-            self.cal_charge_sec = 0
-        elif current < -self.CHARGE_CURRENT:
-            self.cal_charge_sec += dt
-            if self.cal_charge_sec >= 5.0:
-                if self.cal_coulombs > 0 or self.cal_start_voltage > 0:
-                    self.log.append(f"  [{time_s:.0f}s] Segment invalidated (charging)")
-                self.cal_coulombs = 0
-                self.cal_target = 0
-                self.cal_start_voltage = 0
-                self.cal_charge_sec = 0
-        else:
-            self.cal_charge_sec = 0
-
-        # Rest detection
-        if abs(current) < self.REST_CURRENT:
-            if self.rest_since is None:
-                self.rest_since = time_s
-            stable_rest = (time_s - self.rest_since) >= self.REST_STABLE_S
-
-            if stable_rest:
-                # SOC blend (5%)
-                soc_v = self.soc_from_voltage(voltage)
-                self.soc_percent = self.soc_percent * 0.95 + soc_v * 0.05
-                self.coulomb_count = (self.soc_percent / 100.0) * self.estimated_as
-
-                # Current auto-zero
-                raw = current + self.current_offset
-                self.current_offset = self.current_offset * 0.9 + raw * 0.1
-
-                # Voltage calibration (slow convergence)
-                if voltage > self.vbat_max * 0.98:
-                    conv = self.CONVERGE_FAST if voltage > self.vbat_max else self.CONVERGE_SLOW
-                    self.vbat_max = self.vbat_max * (1 - conv) + voltage * conv
-                if voltage < self.vbat_min * 1.05:
-                    conv = self.CONVERGE_FAST if voltage < self.vbat_min else self.CONVERGE_SLOW
-                    self.vbat_min = self.vbat_min * (1 - conv) + voltage * conv
-
-                # Init segment start
-                if self.cal_start_voltage == 0:
-                    self.cal_start_voltage = voltage
-                    self.cal_start_time = time_s
-                    self.log.append(f"  [{time_s:.0f}s] Segment start: {voltage:.3f}V")
-        else:
-            self.rest_since = None
-
-        # Calibration save check
-        if self.cal_target <= 0:
-            target_reached = ((time_s - self.cal_start_time) >= self.CAL_INITIAL_TIME_S
-                              and self.cal_coulombs >= self.CAL_MIN_COULOMBS)
-        else:
-            target_reached = self.cal_coulombs >= self.cal_target
-
-        if (target_reached and self.cal_start_voltage > 0 and self.cal_coulombs > 0
-                and abs(current) < self.REST_CURRENT
-                and self.rest_since is not None
-                and (time_s - self.rest_since) >= self.REST_STABLE_S):
-
-            v_end = voltage
-            soc_start = self.soc_from_voltage(self.cal_start_voltage)
-            soc_end = self.soc_from_voltage(v_end)
-            delta_soc = soc_start - soc_end
-
-            if delta_soc > 5.0:
-                est_ah = (self.cal_coulombs / 3600.0) / (delta_soc / 100.0)
-                if 1.0 < est_ah < 500.0:
-                    # Unified weighted convergence
-                    weight = max(0.05, min(0.5, delta_soc / 100.0))
-                    self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
-                    self.estimated_as = self.estimated_ah * 3600.0
-                    # Trust once moved >5% from nominal
-                    if not self.capacity_trusted and abs(self.estimated_ah - self.nominal_ah) > self.nominal_ah * 0.05:
-                        self.capacity_trusted = True
-                        self.auto_deep_sleep = True
-
-                    self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, True))
-                    trusted = 'T' if self.capacity_trusted else ''
-                    self.log.append(
-                        f"  [{time_s:.0f}s] CAL: {self.cal_coulombs/3600:.1f}Ah "
-                        f"dSOC={delta_soc:.1f}% w={weight:.2f} est={est_ah:.1f}Ah "
-                        f"-> cap={self.estimated_ah:.1f}Ah {trusted}"
-                    )
-
-            self.cal_last_delta_soc = int(delta_soc)
-            self.cal_target = self.cal_coulombs * 2.0
-            self.cal_start_voltage = v_end
-            self.cal_start_time = time_s
-            self.cal_coulombs = 0
-
-
-# ============================================================
-# Scenarios
-# ============================================================
-def scenario_steady(battery, dt=0.1):
-    """Steady discharge at 5A until 20%, then rest."""
-    events = []
-    t = 0
-    # Initial rest (10s)
-    for _ in range(int(10 / dt)):
-        events.append((t, 0))
-        t += dt
-    # Discharge at 5A
-    while battery.true_soc > 20:
-        events.append((t, 5.0))
-        t += dt
-        battery.discharge(5.0, dt)
-    # Reset battery state for actual sim
-    battery.coulombs_remaining = battery.true_capacity_as * 0.75
-    # Final rest (30s)
-    for _ in range(int(30 / dt)):
-        events.append((t, 0))
-        t += dt
-    return events
-
-
-def scenario_mixed(battery, dt=0.1):
-    """Realistic van scenario: discharge, rest, partial charge, repeat."""
-    events = []
-    t = 0
-
-    def add(current, duration):
-        nonlocal t
-        for _ in range(int(duration / dt)):
-            events.append((t, current))
-            t += dt
-
-    # Start with rest
-    add(0, 15)
-
-    # Cycle 1: fridge running (2A for 30min), then rest
-    add(2.0, 1800)
-    add(0, 20)
-
-    # Cycle 2: heavier load (8A for 15min), then rest
-    add(8.0, 900)
-    add(0, 20)
-
-    # Partial charge from solar (3A for 5min) — should invalidate segment
-    add(-3.0, 300)
-    add(0, 15)
-
-    # Cycle 3: mixed load (5A for 45min), then rest
-    add(5.0, 2700)
-    add(0, 20)
-
-    # Cycle 4: light load (1A for 60min), then rest
-    add(1.0, 3600)
-    add(0, 20)
-
-    # Cycle 5: heavy load (10A for 20min), then rest
-    add(10.0, 1200)
-    add(0, 30)
-
-    return events
-
-
-def scenario_long(battery, dt=0.1):
-    """Long discharge from 90% to 10% at 3A with periodic rests."""
-    events = []
-    t = 0
-
-    def add(current, duration):
-        nonlocal t
-        for _ in range(int(duration / dt)):
-            events.append((t, current))
-            t += dt
-
-    add(0, 15)  # initial rest
-
-    # Discharge in 30min blocks with 15s rest between
-    for _ in range(20):
-        add(3.0, 1800)
-        add(0, 15)
-
-    add(0, 30)  # final rest
-    return events
-
-
-def scenario_multicycle(battery, dt=0.1):
-    """Multiple charge/discharge cycles to test convergence."""
-    events = []
-    t = 0
-
-    def add(current, duration):
-        nonlocal t
-        for _ in range(int(duration / dt)):
-            events.append((t, current))
-            t += dt
-
-    for cycle in range(4):
-        add(0, 15)  # rest
-        # Discharge at 5A for 2h (10Ah per cycle)
-        for _ in range(8):  # 8 x 15min blocks
-            add(5.0, 900)
-            add(0, 15)
-        # Charge at 10A for 1h (back ~10Ah)
-        add(-10.0, 3600)
-        add(0, 15)
-
-    # Final long discharge
-    add(0, 15)
-    for _ in range(12):
-        add(3.0, 1800)
-        add(0, 15)
-    add(0, 30)
-
-    return events
-
-
-SCENARIOS = {
-    'steady': scenario_steady,
-    'mixed': scenario_mixed,
-    'long': scenario_long,
-    'multicycle': scenario_multicycle,
-}
-
-
-# ============================================================
-# Main simulation
-# ============================================================
-def run_simulation(true_ah, nominal_ah, cells, noise, scenario_name):
-    dt = 0.1  # 100ms like firmware
-
-    battery = Battery(true_ah, cells, voltage_noise=noise)
-    cal = CalibrationState(nominal_ah, cells)
-
-    # Generate scenario events
-    battery_copy = Battery(true_ah, cells, voltage_noise=noise)
-    battery_copy.coulombs_remaining = battery.coulombs_remaining
-    scenario_fn = SCENARIOS[scenario_name]
-    events = scenario_fn(battery_copy, dt)
-
-    # Reset battery to 75%
-    battery.coulombs_remaining = battery.true_capacity_as * 0.75
-
-    # Init SOC from voltage (like firmware boot)
-    v_init = battery.read_voltage(0)
-    cal.soc_percent = cal.soc_from_voltage(v_init)
-    cal.coulomb_count = (cal.soc_percent / 100.0) * cal.estimated_as
-
-    print(f"=== BaMe Calibration Simulation ===")
-    print(f"True capacity:    {true_ah} Ah")
-    print(f"Nominal capacity: {nominal_ah} Ah")
-    print(f"Cells:            {cells}S")
-    print(f"Voltage noise:    {noise*1000:.0f}mV/cell")
-    print(f"Scenario:         {scenario_name}")
-    print(f"Duration:         {events[-1][0]:.0f}s ({events[-1][0]/3600:.1f}h)")
-    print(f"Initial SOC:      {battery.true_soc:.1f}% (true) / {cal.soc_percent:.1f}% (estimated)")
-    print(f"---")
-
-    last_print = -999
-    for time_s, true_current in events:
-        # Battery physics
-        battery.discharge(true_current, dt)
-
-        # Sensor readings (with noise)
-        v = battery.read_voltage(true_current)
-        i = battery.read_current(true_current)
-
-        # Firmware algorithm
-        old_log_len = len(cal.log)
-        cal.update(v, i, dt, time_s)
-
-        # Print new log entries
-        for entry in cal.log[old_log_len:]:
-            print(entry)
-
-    print(f"---")
-    print(f"Final true SOC:   {battery.true_soc:.1f}%")
-    print(f"Final est. SOC:   {cal.soc_percent:.1f}%")
-    print(f"SOC error:        {abs(battery.true_soc - cal.soc_percent):.1f}%")
-    print()
-    print(f"True capacity:    {true_ah:.1f} Ah")
-    print(f"Est. capacity:    {cal.estimated_ah:.1f} Ah")
-    print(f"Error:            {abs(true_ah - cal.estimated_ah):.1f} Ah ({abs(true_ah - cal.estimated_ah)/true_ah*100:.1f}%)")
-    print(f"Capacity trusted:  {cal.capacity_trusted}")
-    print(f"Eco mode:         {cal.auto_deep_sleep}")
-    print(f"Current offset:   {cal.current_offset*1000:.1f}mA")
-    print(f"Vmax/Vmin:        {cal.vbat_max:.3f}/{cal.vbat_min:.3f}V")
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _battery import Battery
+from _firmware import FirmwareMirror, TICK_S
+import _scenarios as scen
+
+
+SCENARIOS = ['steady', 'glaciere', 'mixed', 'long', 'deep']
+
+
+def make_scenario(name, dt_s):
+    if name == 'steady':
+        return scen.steady(current=5.0, duration_s=4 * 3600, dt_s=dt_s)
+    if name == 'glaciere':
+        return scen.glaciere_cycle(total_s=8 * 3600, dt_s=dt_s)
+    if name == 'mixed':
+        return scen.mixed_van(dt_s=dt_s)
+    if name == 'long':
+        return scen.long_steady(dt_s=dt_s)
+    if name == 'deep':
+        return scen.deep_cycle(dt_s=dt_s)
+    raise SystemExit(f"unknown scenario: {name}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--scenario', choices=SCENARIOS, default='mixed')
+    ap.add_argument('--true-capacity', type=float, default=50.0,
+                    help='real battery capacity in Ah')
+    ap.add_argument('--nominal-capacity', type=float, default=80.0,
+                    help='what the user typed in the menu')
+    ap.add_argument('--cells', type=int, default=4)
+    ap.add_argument('--initial-soc', type=float, default=85.0)
+    ap.add_argument('--noise-v', type=float, default=0.005)
+    ap.add_argument('--noise-i', type=float, default=0.005)
+    ap.add_argument('--prod', action='store_true',
+                    help='run the prod gate (single-shot save) instead of dev')
+    ap.add_argument('--seed', type=int, default=42)
+    args = ap.parse_args()
+
+    random.seed(args.seed)
+
+    battery = Battery(true_capacity_ah=args.true_capacity, cells=args.cells,
+                      initial_soc=args.initial_soc,
+                      voltage_noise=args.noise_v, current_noise=args.noise_i)
+    fw = FirmwareMirror(nominal_capacity_ah=args.nominal_capacity,
+                        cells=args.cells, dev=not args.prod)
+    # Boot sync (mirror of firmware setup)
+    fw.init_soc_from_voltage(battery.read_voltage(0))
+
+    print(f"=== BaMe calibration sim ===")
+    print(f"true cap {args.true_capacity}Ah  nominal {args.nominal_capacity}Ah  "
+          f"{args.cells}S  build={'PROD' if args.prod else 'DEV'}  "
+          f"scenario={args.scenario}")
+    print(f"initial SOC: true={battery.true_soc:.1f}%  est={fw.soc_percent:.1f}%")
     print()
 
-    if cal.estimates:
-        print(f"Calibration history ({len(cal.estimates)} estimates):")
-        print(f"  {'Time':>8s}  {'Raw est':>8s}  {'dSOC':>5s}  {'Cap now':>8s}  {'Error':>6s}  Status")
-        for t, est, ds, cap, ok in cal.estimates:
-            err = abs(est - true_ah) / true_ah * 100
-            status = 'OK' if ok else 'rejected'
-            print(f"  {t:7.0f}s  {est:7.1f}Ah  {ds:4.1f}%  {cap:7.1f}Ah  {err:5.1f}%  {status}")
+    # Track gauge accuracy across the run: pairs (t, true_soc, shown_soc)
+    gauge_history = []
+    next_commit_idx = 0
+
+    for t, true_i in make_scenario(args.scenario, TICK_S):
+        battery.step(true_i, TICK_S)
+        v_raw = battery.read_voltage(true_i)
+        i_raw = battery.read_current(true_i)
+        fw.update(v_raw, i_raw, t)
+
+        # Snapshot gauge reading every 30 s for the table
+        if not gauge_history or t - gauge_history[-1][0] >= 30.0:
+            gauge_history.append((t, battery.true_soc, fw.soc_percent,
+                                  battery.coulombs_remaining / 3600.0,
+                                  fw.coulomb_count / 3600.0))
+
+    # Final summary
+    print(f"\n=== Result ===")
+    print(f"true SOC final:  {battery.true_soc:6.2f}%")
+    print(f"est SOC final:   {fw.soc_percent:6.2f}%")
+    print(f"true capacity:   {args.true_capacity:6.2f} Ah")
+    print(f"est  capacity:   {fw.battery_capacity_ah:6.2f} Ah  "
+          f"(error {abs(fw.battery_capacity_ah - args.true_capacity)/args.true_capacity*100:.1f}%)")
+    print(f"vbat_top final:  {fw.vbat_top:6.3f} V  ({fw.vbat_top/args.cells:.3f} V/cell)")
+    print(f"current offset:  {fw.current_offset*1000:+5.1f} mA")
+
+    # Gauge accuracy: SOC% shown vs true at each commit
+    if fw.cap_estimates and gauge_history:
+        print(f"\nGauge tracking around commit events:")
+        print(f"  {'t(s)':>7s} {'capAh':>7s} {'true SOC':>9s} {'shown SOC':>10s} "
+              f"{'true Ah':>8s} {'shown Ah':>9s} {'soc err':>8s}")
+        for t_commit, est, ds, cap, ok in fw.cap_estimates:
+            # Find nearest gauge sample
+            sample = min(gauge_history, key=lambda g: abs(g[0] - t_commit))
+            tg, ts, ss, tah, sah = sample
+            tag = 'OK' if ok else 'rej'
+            soc_err = ss - ts
+            print(f"  {int(tg):7d} {cap:7.1f} {ts:8.2f}% {ss:9.2f}% "
+                  f"{tah:7.2f}A {sah:8.2f}A {soc_err:+7.2f}% {tag}")
+
+    # Final gauge state
+    if gauge_history:
+        t_end, ts_end, ss_end, tah_end, sah_end = gauge_history[-1]
+        print(f"\nFinal gauge state (t={int(t_end)}s):")
+        print(f"  true:    SOC {ts_end:5.1f}%   {tah_end:5.1f} Ah / {args.true_capacity:.1f} Ah")
+        print(f"  shown:   SOC {ss_end:5.1f}%   {sah_end:5.1f} Ah / {fw.battery_capacity_ah:.1f} Ah")
+        print(f"  error:   {ss_end - ts_end:+5.1f}% SOC,  {sah_end - tah_end:+5.1f} Ah")
+        # ASCII bar (40 chars wide)
+        def bar(pct, label):
+            n = int(max(0, min(100, pct)) * 40 / 100)
+            return f"  {label} [{'#'*n}{'.'*(40-n)}] {pct:5.1f}%"
+        print(bar(ts_end, 'true ') )
+        print(bar(ss_end, 'shown'))
+
+    if fw.events:
+        print(f"\nEvent log ({len(fw.events)} events):")
+        for t, kind, payload in fw.events:
+            print(f"  {int(t):7d}s  {kind:<20s}  {payload}")
+
+    if fw.cap_estimates:
+        print(f"\nCalibration history ({len(fw.cap_estimates)} commits/rejects):")
+        print(f"  {'t(s)':>7s} {'estAh':>7s} {'dSOC':>5s} {'capAh':>7s} {'err':>5s}  status")
+        for t, est, ds, cap, ok in fw.cap_estimates:
+            est_str = f"{est:7.1f}" if est is not None else "  --   "
+            err = abs((est or 0) - args.true_capacity) / args.true_capacity * 100 if est else 0
+            err_str = f"{err:4.1f}%"
+            tag = 'OK' if ok else 'rej'
+            print(f"  {int(t):7d} {est_str} {ds:4.1f}% {cap:7.1f} {err_str}  {tag}")
     else:
-        print("No calibration estimates produced.")
-        print("(Scenario may be too short or lack sufficient rest periods)")
-
-    return cal
+        print("(no calibration estimates produced — scenario too short or no rest)")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='BaMe calibration simulator')
-    parser.add_argument('--capacity', type=float, default=50, help='True battery capacity in Ah')
-    parser.add_argument('--nominal', type=float, default=80, help='Nominal (user-set) capacity in Ah')
-    parser.add_argument('--cells', type=int, default=4, help='Cell count (S)')
-    parser.add_argument('--noise', type=float, default=0.005, help='Voltage noise per cell in V')
-    parser.add_argument('--scenario', choices=SCENARIOS.keys(), default='mixed', help='Test scenario')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    args = parser.parse_args()
-
-    random.seed(args.seed)
-    run_simulation(args.capacity, args.nominal, args.cells, args.noise, args.scenario)
+    main()

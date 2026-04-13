@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.18
+
+- Charge detection now branches on install topology, set at compile time:
+  `BAME_WIRING_BUS=1` (BUS install — every current passes the shunt, charge
+  is detected by sustained negative I) or `=0` (LOAD install — charger is
+  upstream of the shunt, charge is inferred from voltage trend with the
+  LFP_CELL_CHARGE_MIN guard against the LFP rebound). Fixes the icon
+  flickering at the 13.5V boundary on BUS installs.
+- Cell count moves from runtime menu + EEPROM byte to a compile-time
+  `BAME_CELLS` define. Saves the menu item, EEPROM byte, and a few hundred
+  bytes of flash. Cell count is a physical install decision; you don't
+  change it on a running device anyway.
+- platformio.ini restructured around per-install env names. Each combo
+  (`nano-bus-4s`, `nano-load-4s`, `prod-bus-8s`, ...) builds independently
+  to `.pio/build/<env>/firmware.hex`. Default env: `nano-bus-4s`.
+- Added QUICKSTART.md with the BUS vs LOAD wiring diagram, build commands,
+  and how to add custom envs (other cell counts, voltage windows).
+- Sim restructured into shared modules (`_battery.py`, `_firmware.py`,
+  `_scenarios.py`) with thin CLI wrappers (`trend_sim.py`,
+  `calibration_sim.py`). Battery model now includes polarization recovery
+  for realistic LFP rebound. Calibration sim shows true SOC vs displayed
+  SOC + an ASCII gauge so you can see what the user sees.
+- README intro rewritten in casual tinkerer tone — pointing readers to
+  QUICKSTART.md right at the top.
+
 ## v1.17
 
 - Smoothed current display switched from a 2-point sliding 80s window to an EWMA (RC low-pass / capacitor analog). Refreshes every tick instead of stepping every 10s, no edge discontinuity. Initial τ=120s, lowered to τ=30s after on-device testing — recovery feels right without too much jitter on glaciere cycles.
