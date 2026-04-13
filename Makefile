@@ -67,12 +67,9 @@ core-test: $(CORE_LIB)
 # --- Sim & tools ---
 
 sim-cal:
-	python sim/calibration_sim.py --true-capacity 50 --nominal-capacity 80 --scenario deep
-
-sim-trend:
-	python sim/trend_sim.py --scenario glaciere --duration 600
+	python sim/calibration_sim.py --true-capacity 50 --nominal-capacity 80 --cycles 3
 
 screenshots:
 	python sim/render_screens.py
 
-.PHONY: build upload monitor clean size list-envs core-lib core-test sim-cal sim-trend screenshots
+.PHONY: build upload monitor clean size list-envs core-lib core-test sim-cal screenshots

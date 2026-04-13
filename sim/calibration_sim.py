@@ -1,154 +1,170 @@
 #!/usr/bin/env python3
 """
-Capacity-calibration end-to-end simulation.
+Capacity-calibration end-to-end simulation — v2 (pure coulomb counting).
 
-Drives `_firmware.FirmwareMirror` against a `_battery.Battery` with a
-known true capacity, using a load profile from `_scenarios`. Prints one
-line per calibration event (open / preempt / commit / rollback) and a
-final summary of how close the estimate got to the truth.
+Drives the REAL C core (src/bame_core.c, loaded via ctypes) against a
+`_battery.Battery` with known true capacity and a load profile from
+`_scenarios`. Prints events (full detected, BMS cutoff cycle closed) and
+a final summary of how close the learned capacity got to the truth.
 
-Use it to test "battery configured wrong" cases:
-  --true-capacity 50 --nominal-capacity 80
-  --true-cell-full 3.55  (real pack tops at 3.55, not 3.65)
-  --user-vmin-utile 11.5 (user typed wrong)
+Test "battery configured wrong" cases:
+  --true-capacity 50 --nominal-capacity 80   # sticker lies
+  --cycles 4                                  # repeat → watch convergence
 
 Usage:
-    python sim/calibration_sim.py [--scenario mixed] [--true-capacity 50]
-                                  [--nominal-capacity 80] [--cells 4]
+    make core-lib            # compile sim/bame_core.dll once
+    make sim-cal             # or: python sim/calibration_sim.py ...
 """
 
 import argparse
+import os
 import random
 import sys
-import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _battery import Battery
-from _firmware import FirmwareMirror, TICK_S
-import _scenarios as scen
+from bame_core import BameCore, EVT_FULL, EVT_BMS_CUTOFF, EVT_PARTIAL
 
 
-SCENARIOS = ['steady', 'glaciere', 'mixed', 'long', 'deep']
+TICK_S = 0.1
+EVENT_NAMES = {0: 'none', 1: 'FULL', 2: 'BMS_CUTOFF', 3: 'PARTIAL'}
 
 
-def make_scenario(name, dt_s):
-    if name == 'steady':
-        return scen.steady(current=5.0, duration_s=4 * 3600, dt_s=dt_s)
-    if name == 'glaciere':
-        return scen.glaciere_cycle(total_s=8 * 3600, dt_s=dt_s)
-    if name == 'mixed':
-        return scen.mixed_van(dt_s=dt_s)
-    if name == 'long':
-        return scen.long_steady(dt_s=dt_s)
-    if name == 'deep':
-        return scen.deep_cycle(dt_s=dt_s)
-    raise SystemExit(f"unknown scenario: {name}")
+def run_one_cycle(core, battery, discharge_a, charge_a, rest_s, bms_cutoff_v,
+                   now_ms_ref, verbose=False):
+    """Discharge battery until BMS cutoff, rest, recharge. Drives the C core
+    with the simulated voltage/current at TICK_S granularity."""
+    events = []
+    t_local = 0.0
+    now_ms = now_ms_ref
+
+    # Discharge phase
+    while battery.true_soc > 0.5:
+        battery.step(discharge_a, TICK_S)
+        v = battery.read_voltage(discharge_a)
+        i = battery.read_current(discharge_a)
+        evt = core.step(v, i, TICK_S, now_ms)
+        if evt != 0:
+            events.append((t_local, evt))
+            if verbose:
+                print(f"   t={t_local:7.0f}s  {EVENT_NAMES[evt]}  "
+                      f"core.coulomb={core.coulomb_count:.0f}  cap={core.capacity_ah:.2f}")
+        t_local += TICK_S
+        now_ms += int(TICK_S * 1000)
+
+    # Force BMS cutoff by dropping voltage briefly — matches real BMS behavior
+    for _ in range(10):  # 1 second at cutoff voltage
+        evt = core.step(bms_cutoff_v, 0.0, TICK_S, now_ms)
+        if evt == EVT_BMS_CUTOFF:
+            events.append((t_local, evt))
+            if verbose:
+                print(f"   t={t_local:7.0f}s  BMS_CUTOFF  "
+                      f"delivered={battery.true_capacity_as/3600 - battery.coulombs_remaining/3600:.2f}Ah "
+                      f"core.learned={core.capacity_ah:.2f}Ah")
+        t_local += TICK_S
+        now_ms += int(TICK_S * 1000)
+
+    # Rest
+    for _ in range(int(rest_s / TICK_S)):
+        evt = core.step(0.0, 0.0, TICK_S, now_ms)
+        t_local += TICK_S
+        now_ms += int(TICK_S * 1000)
+
+    # Recharge (negative current; in BUS mode this is visible to the core).
+    # Wiring LOAD is invisible — the core only sees current=0 during charge.
+    battery.coulombs_remaining = 0
+    while battery.true_soc < 99.5:
+        battery.step(-charge_a, TICK_S)
+        v = battery.read_voltage(-charge_a)
+        i_core = -charge_a if core.state.wiring_bus else 0.0
+        evt = core.step(v, i_core, TICK_S, now_ms)
+        if evt != 0:
+            events.append((t_local, evt))
+            if verbose:
+                print(f"   t={t_local:7.0f}s  {EVENT_NAMES[evt]}  "
+                      f"core.cap={core.capacity_ah:.2f}")
+        t_local += TICK_S
+        now_ms += int(TICK_S * 1000)
+
+    # Final rest at top — voltage stays at top OCV, should trigger FULL event
+    for _ in range(int(rest_s / TICK_S)):
+        battery.step(0.0, TICK_S)
+        v = battery.read_voltage(0.0)
+        evt = core.step(v, 0.0, TICK_S, now_ms)
+        if evt != 0:
+            events.append((t_local, evt))
+            if verbose:
+                print(f"   t={t_local:7.0f}s  {EVENT_NAMES[evt]}  "
+                      f"core.coulomb={core.coulomb_count:.0f}")
+        t_local += TICK_S
+        now_ms += int(TICK_S * 1000)
+
+    return events, now_ms
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--scenario', choices=SCENARIOS, default='mixed')
     ap.add_argument('--true-capacity', type=float, default=50.0,
                     help='real battery capacity in Ah')
     ap.add_argument('--nominal-capacity', type=float, default=80.0,
                     help='what the user typed in the menu')
     ap.add_argument('--cells', type=int, default=4)
-    ap.add_argument('--initial-soc', type=float, default=85.0)
+    ap.add_argument('--wiring', choices=['bus', 'load'], default='bus')
+    ap.add_argument('--cycles', type=int, default=3,
+                    help='how many full→cutoff→recharge cycles to run')
+    ap.add_argument('--discharge-a', type=float, default=5.0)
+    ap.add_argument('--charge-a', type=float, default=5.0)
+    ap.add_argument('--rest-s', type=float, default=60.0)
     ap.add_argument('--noise-v', type=float, default=0.005)
     ap.add_argument('--noise-i', type=float, default=0.005)
-    ap.add_argument('--prod', action='store_true',
-                    help='run the prod gate (single-shot save) instead of dev')
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--verbose', action='store_true')
     args = ap.parse_args()
 
     random.seed(args.seed)
 
     battery = Battery(true_capacity_ah=args.true_capacity, cells=args.cells,
-                      initial_soc=args.initial_soc,
+                      initial_soc=100.0,
                       voltage_noise=args.noise_v, current_noise=args.noise_i)
-    fw = FirmwareMirror(nominal_capacity_ah=args.nominal_capacity,
-                        cells=args.cells, dev=not args.prod)
-    # Boot sync (mirror of firmware setup)
-    fw.init_soc_from_voltage(battery.read_voltage(0))
+    core = BameCore(cells=args.cells, wiring_bus=(args.wiring == 'bus'),
+                    capacity_ah=args.nominal_capacity)
 
-    print(f"=== BaMe calibration sim ===")
+    # Boot: the user declares battery full once at startup (or the auto-
+    # detector fires on first at-top + rest). We skip the wait and declare.
+    core.declare_full(0)
+
+    print(f"=== BaMe v2 calibration sim ===")
     print(f"true cap {args.true_capacity}Ah  nominal {args.nominal_capacity}Ah  "
-          f"{args.cells}S  build={'PROD' if args.prod else 'DEV'}  "
-          f"scenario={args.scenario}")
-    print(f"initial SOC: true={battery.true_soc:.1f}%  est={fw.soc_percent:.1f}%")
+          f"{args.cells}S  wiring={args.wiring}  cycles={args.cycles}")
+    print(f"boot: user declared full -> core.coulomb={core.coulomb_count:.0f}As "
+          f"({core.soc_percent:.0f}%)")
     print()
 
-    # Track gauge accuracy across the run: pairs (t, true_soc, shown_soc)
-    gauge_history = []
-    next_commit_idx = 0
+    bms_cutoff_v = 0.3  # voltage during BMS cutoff event
+    now_ms = 0
+    cycle_results = []
 
-    for t, true_i in make_scenario(args.scenario, TICK_S):
-        battery.step(true_i, TICK_S)
-        v_raw = battery.read_voltage(true_i)
-        i_raw = battery.read_current(true_i)
-        fw.update(v_raw, i_raw, t)
+    for cycle in range(1, args.cycles + 1):
+        battery.coulombs_remaining = battery.true_capacity_as * 1.0  # always start full
+        if args.verbose:
+            print(f"--- Cycle {cycle} ---")
+        events, now_ms = run_one_cycle(core, battery,
+                                        args.discharge_a, args.charge_a,
+                                        args.rest_s, bms_cutoff_v, now_ms,
+                                        verbose=args.verbose)
+        cycle_results.append((cycle, core.capacity_ah, core.capacity_learned))
+        print(f"cycle {cycle}: real={args.true_capacity}Ah  "
+              f"learned={core.capacity_ah:.2f}Ah  "
+              f"err={abs(core.capacity_ah - args.true_capacity):.2f}Ah  "
+              f"({'learned' if core.capacity_learned else 'not yet learned'})")
 
-        # Snapshot gauge reading every 30 s for the table
-        if not gauge_history or t - gauge_history[-1][0] >= 30.0:
-            gauge_history.append((t, battery.true_soc, fw.soc_percent,
-                                  battery.coulombs_remaining / 3600.0,
-                                  fw.coulomb_count / 3600.0))
-
-    # Final summary
-    print(f"\n=== Result ===")
-    print(f"true SOC final:  {battery.true_soc:6.2f}%")
-    print(f"est SOC final:   {fw.soc_percent:6.2f}%")
-    print(f"true capacity:   {args.true_capacity:6.2f} Ah")
-    print(f"est  capacity:   {fw.battery_capacity_ah:6.2f} Ah  "
-          f"(error {abs(fw.battery_capacity_ah - args.true_capacity)/args.true_capacity*100:.1f}%)")
-    print(f"vbat_top final:  {fw.vbat_top:6.3f} V  ({fw.vbat_top/args.cells:.3f} V/cell)")
-    print(f"current offset:  {fw.current_offset*1000:+5.1f} mA")
-
-    # Gauge accuracy: SOC% shown vs true at each commit
-    if fw.cap_estimates and gauge_history:
-        print(f"\nGauge tracking around commit events:")
-        print(f"  {'t(s)':>7s} {'capAh':>7s} {'true SOC':>9s} {'shown SOC':>10s} "
-              f"{'true Ah':>8s} {'shown Ah':>9s} {'soc err':>8s}")
-        for t_commit, est, ds, cap, ok in fw.cap_estimates:
-            # Find nearest gauge sample
-            sample = min(gauge_history, key=lambda g: abs(g[0] - t_commit))
-            tg, ts, ss, tah, sah = sample
-            tag = 'OK' if ok else 'rej'
-            soc_err = ss - ts
-            print(f"  {int(tg):7d} {cap:7.1f} {ts:8.2f}% {ss:9.2f}% "
-                  f"{tah:7.2f}A {sah:8.2f}A {soc_err:+7.2f}% {tag}")
-
-    # Final gauge state
-    if gauge_history:
-        t_end, ts_end, ss_end, tah_end, sah_end = gauge_history[-1]
-        print(f"\nFinal gauge state (t={int(t_end)}s):")
-        print(f"  true:    SOC {ts_end:5.1f}%   {tah_end:5.1f} Ah / {args.true_capacity:.1f} Ah")
-        print(f"  shown:   SOC {ss_end:5.1f}%   {sah_end:5.1f} Ah / {fw.battery_capacity_ah:.1f} Ah")
-        print(f"  error:   {ss_end - ts_end:+5.1f}% SOC,  {sah_end - tah_end:+5.1f} Ah")
-        # ASCII bar (40 chars wide)
-        def bar(pct, label):
-            n = int(max(0, min(100, pct)) * 40 / 100)
-            return f"  {label} [{'#'*n}{'.'*(40-n)}] {pct:5.1f}%"
-        print(bar(ts_end, 'true ') )
-        print(bar(ss_end, 'shown'))
-
-    if fw.events:
-        print(f"\nEvent log ({len(fw.events)} events):")
-        for t, kind, payload in fw.events:
-            print(f"  {int(t):7d}s  {kind:<20s}  {payload}")
-
-    if fw.cap_estimates:
-        print(f"\nCalibration history ({len(fw.cap_estimates)} commits/rejects):")
-        print(f"  {'t(s)':>7s} {'estAh':>7s} {'dSOC':>5s} {'capAh':>7s} {'err':>5s}  status")
-        for t, est, ds, cap, ok in fw.cap_estimates:
-            est_str = f"{est:7.1f}" if est is not None else "  --   "
-            err = abs((est or 0) - args.true_capacity) / args.true_capacity * 100 if est else 0
-            err_str = f"{err:4.1f}%"
-            tag = 'OK' if ok else 'rej'
-            print(f"  {int(t):7d} {est_str} {ds:4.1f}% {cap:7.1f} {err_str}  {tag}")
-    else:
-        print("(no calibration estimates produced — scenario too short or no rest)")
+    print()
+    print(f"=== Result ===")
+    print(f"true capacity:    {args.true_capacity:.2f} Ah")
+    print(f"learned capacity: {core.capacity_ah:.2f} Ah "
+          f"(error {abs(core.capacity_ah - args.true_capacity)/args.true_capacity*100:.1f}%)")
+    print(f"soc_uncertain:    {core.soc_uncertain}")
 
 
 if __name__ == '__main__':
