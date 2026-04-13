@@ -254,36 +254,36 @@ def draw_trend_arrow(d, x, y, direction):
         d.fill_triangle(x, y, x + 8, y, x + 4, y + 6)
 
 
-# --- Main display: mirrors updateDisplay() src/main.cpp:1045 (prod build) ---
+# --- Main display: mirrors updateDisplay() in src/display.cpp (v2) ---
 
-def _draw_main(d, voltage, current, soc, cap_ah, trend=0, charging_ext=False, eco=False):
+def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
+               soc_uncertain=False, capacity_learned=True):
     d.clear()
     remaining_ah = int(soc * cap_ah / 100)
 
-    # Yellow zone: SOC gauge with XOR %         src/main.cpp:1058 → gfx.drawGauge()
     draw_gauge(d, soc)
 
-    # Line 1: big Ah left + big voltage right   src/main.cpp:1063-1077
+    # Line 1: big Ah (left) + big voltage (right), '?' if soc uncertain
     ah_str = str(remaining_ah)
     d.text(0, BLUE_Y + 2, ah_str, size=2)
-    d.text(len(ah_str) * 12, BLUE_Y + 2, "Ah")
+    ah_digits = len(ah_str)
+    d.text(ah_digits * 12, BLUE_Y + 2, "Ah")
+    if soc_uncertain:
+        d.text(ah_digits * 12, BLUE_Y + 10, "?")
     d.text(W - 54, BLUE_Y + 2, f"{voltage:.1f}", size=2)
     d.text(W - 6, BLUE_Y + 2, "V")
-    # Voltage trend arrow                        src/main.cpp:1078-1097
-    # Prod build stops at fillTriangle (no dev-only countdown fallback).
-    draw_trend_arrow(d, W - 66, BLUE_Y + 6, trend)
 
-    # Line 2: power (smoothed) left, current right   src/main.cpp:1099-1114
+    # Line 2: power (smoothed) left, raw current right
     power = int(abs(voltage * current))
     d.text(0, BLUE_Y + 22, f"{power}W")
     d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
 
-    # Line 3: HH:MM when active, capacity-Ah at rest   src/main.cpp:1118-1152
+    # Line 3: HH:MM (active) or learned capacity (rest), '*' if not learned
     ty = BLUE_Y + 37
-    active_i = 0.5  # ACTIVE_CURRENT (src/main.cpp:47)
+    active_i = 0.5  # ACTIVE_CURRENT
     if abs(current) > active_i:
         if current > 0:
-            hours_left = (remaining_ah) / current
+            hours_left = remaining_ah / current
             d.fill_triangle(0, ty + 3, 6, ty, 6, ty + 6)  # discharge
         else:
             hours_left = (cap_ah - remaining_ah) / (-current)
@@ -292,30 +292,29 @@ def _draw_main(d, voltage, current, soc, cap_ah, trend=0, charging_ext=False, ec
         h = int(hours_left)
         m = int((hours_left - h) * 60)
         d.text(10, ty, f"{h:02d}:{m:02d}")
-    elif not eco:
+    else:
         d.text(0, ty, f"{int(cap_ah)}Ah")
+        if not capacity_learned:
+            d.text(28, ty, "*")
 
-    # Dev-only cal counter lives at src/main.cpp:1154-1168 behind #if BAME_DEV,
-    # so prod screenshots don't draw it.
-
-    # Bottom-right battery icon                  src/main.cpp:1170-1176
-    if charging_ext:
-        draw_charging_battery(d, 106, ty, full=False)  # blinks in reality; drawn steady for snapshot
+    # Bottom-right charging icon when rest voltage ≥ top OCV (post-charge)
+    if voltage / cells >= 3.40 and abs(current) < 0.5:
+        draw_charging_battery(d, 106, ty, full=True)
 
 
 # --- Screens ---
 
 def screen_main_discharge(d):
-    _draw_main(d, voltage=13.2, current=3.7, soc=64, cap_ah=80, trend=-1)
+    _draw_main(d, voltage=13.2, current=3.7, soc=64, cap_ah=80)
 
 
 def screen_main_charge(d):
-    _draw_main(d, voltage=14.1, current=-3.0, soc=89, cap_ah=80,
-               trend=+1, charging_ext=True)
+    # BUS install: charge current is visible as negative.
+    _draw_main(d, voltage=14.1, current=-3.0, soc=89, cap_ah=80)
 
 
 def screen_main_rest(d):
-    _draw_main(d, voltage=13.28, current=0.0, soc=64, cap_ah=80, trend=0)
+    _draw_main(d, voltage=13.42, current=0.0, soc=100, cap_ah=80)
 
 
 def screen_no_battery(d):
