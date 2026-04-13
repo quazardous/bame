@@ -20,6 +20,8 @@ void bame_config_defaults(bame_config_t* cfg) {
     cfg->cap_min_ah       = 1.0f;
     cfg->cap_max_ah       = 500.0f;
     cfg->v_rise_partial   = 0.05f;
+    cfg->v_disconnect_drop = 0.5f;
+    cfg->ext_rearm_ms     = 15000u;
 }
 
 
@@ -41,6 +43,9 @@ void bame_init(bame_state_t* s, uint8_t cells, bool wiring_bus,
     s->c_avg_init         = false;
     s->voltage            = 0.0f;
     s->current            = 0.0f;
+    s->charging_external  = false;
+    s->ext_charge_armed   = true;   // first ever "at top" can trigger the flag
+    s->below_top_since_ms = 0u;
 }
 
 
@@ -125,8 +130,72 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
         s->v_slow_avg      = voltage_raw;
     }
 
-    // --- Coulomb integration (bidirectional: charge in BUS adds back) ---
-    s->coulomb_count -= c * dt_s;
+    // --- External-charge detection (LOAD mode only). Freezes integration
+    //     while the charger is holding the battery at top OCV. Symmetric
+    //     hysteresis on both edges:
+    //       * rapid DROP  (>0.5 V fast) = charger unplug → exit charging,
+    //         stay out until a sustained below-top period re-arms
+    //       * rapid RISE  (>0.5 V fast) = charger plug   → force re-arm,
+    //         so the at-top condition immediately re-enters charging
+    //         even if the battery was hanging at 13.8 V post-disconnect
+    //         (no natural below-top dip needed)
+    if (!s->wiring_bus) {
+        // Slow-moving reference (tau ~50s at 100ms tick, alpha=0.002).
+        s->v_slow_avg = s->v_slow_avg * 0.998f + voltage_raw * 0.002f;
+
+        bool rapid_drop = (s->v_slow_avg - voltage_raw) > cfg->v_disconnect_drop;
+        bool rapid_rise = (voltage_raw - s->v_slow_avg) > cfg->v_disconnect_drop;
+        bool at_top     = (voltage_raw / (float)s->cells) >= cfg->v_full_per_cell;
+        bool i_rest     = f_absf(c) < cfg->i_rest;
+
+        // Rapid rise at-top = charger plugged in on top of a high battery.
+        // Force re-arm so the at_top entry check below can fire immediately.
+        if (rapid_rise && at_top) {
+            s->ext_charge_armed = true;
+            s->v_slow_avg = voltage_raw;  // stop re-firing
+        }
+
+        // Re-arm when voltage has stayed below the top plateau for at least
+        // ext_rearm_ms (15 s default). Sustained condition filters out the
+        // short LFP rebond right after a charger disconnect — voltage dips
+        // briefly below top then recovers to 13.7-13.9 V. Only a real
+        // discharge keeps V below top long enough.
+        // below_top_since_ms stores (now_ms + 1) so 0 reliably means "not
+        // tracking" even if at_top first becomes false at now_ms == 0.
+        if (at_top) {
+            s->below_top_since_ms = 0u;
+        } else {
+            if (s->below_top_since_ms == 0u) {
+                s->below_top_since_ms = now_ms + 1u;
+            }
+            uint32_t below_duration = (now_ms + 1u) - s->below_top_since_ms;
+            if (below_duration >= cfg->ext_rearm_ms) {
+                s->ext_charge_armed = true;
+            }
+        }
+
+        if (s->charging_external) {
+            // In ext-charge state: fall out on rapid drop, current spike, or
+            // voltage simply no longer at top.
+            if (rapid_drop || !at_top || !i_rest) {
+                s->charging_external = false;
+                if (rapid_drop) s->v_slow_avg = voltage_raw;  // stop re-firing
+            }
+        } else {
+            // Out of ext-charge: can enter only if armed AND conditions met.
+            if (s->ext_charge_armed && at_top && i_rest) {
+                s->charging_external = true;
+                s->ext_charge_armed  = false;   // consumed
+            }
+        }
+    } else {
+        s->charging_external = false;
+    }
+
+    // Integration: suppressed while charger is driving the voltage.
+    if (!s->charging_external) {
+        s->coulomb_count -= c * dt_s;
+    }
     float cap_as = bame_capacity_as(s);
     // Allow modest over/under-shoot so the cycle measurement sees real delta
     s->coulomb_count = f_clampf(s->coulomb_count, -cap_as * 0.10f, cap_as * 1.10f);
@@ -153,14 +222,18 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
     }
 
     // --- LOAD-mode partial-charge detection: unexplained V rise ---
-    // In BUS mode, charge current is measurable so there is nothing invisible
-    // and `soc_uncertain` is only touched by explicit resets/events.
+    // In BUS mode, charge current is measurable so nothing is invisible.
+    // In LOAD, only trust a rise as "charger" when we're already above the
+    // top-rest OCV — below that, rises are normal LFP rebound after a load.
+    // Uses the same slow v_slow_avg as the disconnect detector above
+    // (maintained there).
     if (!s->wiring_bus) {
-        if (voltage_raw - s->v_slow_avg > cfg->v_rise_partial) {
+        float v_charger_min = cfg->v_full_per_cell * (float)s->cells;
+        if (voltage_raw >= v_charger_min
+                && voltage_raw - s->v_slow_avg > cfg->v_rise_partial) {
             if (!s->soc_uncertain) evt = BAME_EVT_PARTIAL;
             s->soc_uncertain = true;
         }
-        s->v_slow_avg = s->v_slow_avg * 0.99f + voltage_raw * 0.01f;
     }
 
     return evt;

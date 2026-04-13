@@ -336,7 +336,7 @@ def _draw_info_row(d, row, voltage, soc_pct, selected=False):
 # v2 menu (src/menu.cpp): Capacity, Battery full, Reset ALL, Info V (read-only)
 def screen_menu(d):
     d.clear()
-    draw_title(d, "Bame v2.0")
+    draw_title(d, "BaMe v2.0")
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
     draw_menu_item(d, 1, ' ', 'Battery full')
     draw_menu_item(d, 2, ' ', 'Reset ALL')
@@ -345,7 +345,7 @@ def screen_menu(d):
 
 def screen_menu_edit(d):
     d.clear()
-    draw_title(d, "Bame v2.0")
+    draw_title(d, "BaMe v2.0")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
     draw_menu_item(d, 1, ' ', 'Battery full')
     draw_menu_item(d, 2, ' ', 'Reset ALL')

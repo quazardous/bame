@@ -38,14 +38,16 @@ def _lib_path():
 
 class BameConfig(Structure):
     _fields_ = [
-        ("v_full_per_cell",   c_float),
-        ("v_min_battery",     c_float),
-        ("i_rest",            c_float),
-        ("full_rest_ms",      c_uint32),
-        ("cavg_ewma_alpha",   c_float),
-        ("cap_min_ah",        c_float),
-        ("cap_max_ah",        c_float),
-        ("v_rise_partial",    c_float),
+        ("v_full_per_cell",       c_float),
+        ("v_min_battery",         c_float),
+        ("i_rest",                c_float),
+        ("full_rest_ms",          c_uint32),
+        ("cavg_ewma_alpha",       c_float),
+        ("cap_min_ah",            c_float),
+        ("cap_max_ah",            c_float),
+        ("v_rise_partial",        c_float),
+        ("v_disconnect_drop",     c_float),
+        ("ext_rearm_ms",          c_uint32),
     ]
 
 
@@ -67,6 +69,9 @@ class BameState(Structure):
         ("c_avg_init",            c_bool),
         ("voltage",               c_float),
         ("current",               c_float),
+        ("charging_external",     c_bool),
+        ("ext_charge_armed",      c_bool),
+        ("below_top_since_ms",    c_uint32),
     ]
 
 

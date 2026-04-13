@@ -30,11 +30,14 @@ typedef struct {
     float    v_full_per_cell;   // 3.40  — rest voltage above this = at-top
     float    v_min_battery;     // 1.0   — below this = BMS cutoff
     float    i_rest;            // 0.3   — |I| below this = battery at rest
-    uint32_t full_rest_ms;      // 30000 — sustained top+rest needed for full evt
-    float    cavg_ewma_alpha;   // 0.1/30 — smoothed current constant
-    float    cap_min_ah;        // 1.0   — sanity bounds
-    float    cap_max_ah;        // 500.0
-    float    v_rise_partial;    // 0.05  — LOAD mode: V rise > this = partial charge
+    uint32_t full_rest_ms;       // 30000 — sustained top+rest needed for full evt
+    float    cavg_ewma_alpha;    // 0.1/30 — smoothed current constant
+    float    cap_min_ah;         // 1.0   — sanity bounds
+    float    cap_max_ah;         // 500.0
+    float    v_rise_partial;     // 0.05  — LOAD mode: V rise > this = partial charge
+    float    v_disconnect_drop;  // 0.5   — LOAD mode: V drop > this (fast) = charger unplug
+    uint32_t ext_rearm_ms;       // 15000 — V must stay below top this long to re-arm
+                                 //          (filters out post-disconnect LFP rebond)
 } bame_config_t;
 
 
@@ -71,6 +74,11 @@ typedef struct {
     // --- Last-tick derived values (mirrored for display / test harness) ---
     float voltage;                // last raw voltage read
     float current;                // last current after offset + dead-band
+    bool  charging_external;      // LOAD-mode: charger detected, integration frozen
+    bool  ext_charge_armed;       // LOAD-mode: allowed to enter charging_external state
+                                  // (one-shot; consumed on entry, re-armed after a sustained
+                                  //  below-top dip, NOT a brief post-disconnect rebond)
+    uint32_t below_top_since_ms;  // millis when voltage first went below top (0 = not tracking)
 } bame_state_t;
 
 

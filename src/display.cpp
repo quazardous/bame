@@ -27,8 +27,11 @@ void updateDisplay() {
   gfx.drawGauge(soc);
 
   // Line 1: Ah (left, big) + voltage (right, big), with '?' if uncertain.
-  int ahInt = (int)(coulombCount / 3600.0);
+  // Round (not truncate) so tiny sub-1Ah drift between full-event re-syncs
+  // doesn't show "79Ah" when the user is obviously at 100%.
+  int ahInt = (int)((coulombCount / 3600.0) + 0.5f);
   if (ahInt < 0) ahInt = 0;
+  if (ahInt > (int)batteryCapacityAh) ahInt = (int)batteryCapacityAh;
   uint8_t ahDigits = (ahInt >= 100) ? 3 : (ahInt >= 10) ? 2 : 1;
   display.setTextSize(2);
   display.setCursor(0, BLUE_Y + 2);
@@ -100,8 +103,9 @@ void updateDisplay() {
     }
   }
 
-  // Bottom right: charging icon when voltage is at top OCV (post-charge state)
-  if ((voltage / cellCount) >= LFP_CELL_TOP_REST) {
+  // Bottom right: charging icon when firmware believes an external charger
+  // is active (LOAD mode). Hysteresis in bame_core keeps this from flickering.
+  if (chargingExternal) {
     gfx.drawChargingBattery(106, ty, true);
   }
 

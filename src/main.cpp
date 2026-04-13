@@ -23,7 +23,7 @@
 #include "display.h"
 #include "menu.h"
 
-#define BAME_VERSION "2.0-wip"
+#define BAME_VERSION "2.0"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -113,6 +113,7 @@ bool  cAvgInit      = false;
 
 float coulombCount  = 0;
 bool  socUncertain  = false;
+bool  chargingExternal = false;
 
 bool  batteryPresent = false;
 float coulombsAtLastFull       = 0;
@@ -254,6 +255,7 @@ static void updateMeasurements() {
   cAvgInit        = bame.c_avg_init;
   coulombCount    = bame.coulomb_count;
   socUncertain    = bame.soc_uncertain;
+  chargingExternal = bame.charging_external;
   batteryPresent  = bame.battery_present;
   capacityLearned = bame.capacity_learned;
   batteryCapacityAh = bame.capacity_ah;

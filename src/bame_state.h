@@ -29,7 +29,8 @@ extern bool  cAvgInit;
 
 // --- SOC integrator (single source of truth) ---
 extern float coulombCount;
-extern bool  socUncertain;         // LOAD mode: true after invisible partial charge
+extern bool  socUncertain;
+extern bool  chargingExternal;  // LOAD-mode: charger detected, integration frozen         // LOAD mode: true after invisible partial charge
 
 // --- Battery presence + cycle bookkeeping ---
 extern bool  batteryPresent;
