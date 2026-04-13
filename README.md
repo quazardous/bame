@@ -6,16 +6,16 @@ A small, unambitious side project to put repurposed "dumb" golf-cart LiFePO4 bat
 
 Yes, buying a proper modern battery with its own BMS and bluetooth app would do this better. But it's more fun to poke at the problem with an Arduino, an INA226 shunt and a small OLED than to click "add to cart". If you like that kind of thing, this is that kind of thing.
 
-BaMe watches voltage and current, figures out over time how much energy actually fits inside, and gives you a gauge, a State of Charge, and an estimated time remaining that doesn't jump around every time the fridge kicks in.
+BaMe watches current through the shunt, integrates it, and shows you a gauge, remaining Ah, voltage, watts and estimated time. On a discharge cycle that ends at the BMS cutoff, it measures the true capacity of your pack — the value on the sticker is usually wrong.
 
 ## Features
 
-- **Auto capacity calibration** — learns the true Ah of the pack from real usage, no lab cycle needed
-- **Honest SOC** — coulomb counting + voltage lookup + rest-based correction, works even on the flat LFP curve
-- **Tolerates real life** — compressor cycling, brief loads and partial recharges don't poison the estimate
-- **OLED display** with SOC gauge, voltage, current, power, time remaining
-- **Eco mode** — deep sleep with adaptive wake interval for permanent install
-- **Configurable** cell count (1-16S), nominal capacity, usable voltage window
+- **Pure coulomb counting** — charge in, charge out, tracked continuously. No voltage-SOC trick on the flat LFP curve.
+- **Capacity learned from real cycles** — each "battery full → BMS cutoff" sequence records the Ah delivered. Averaged over cycles, the learned value converges to the real capacity.
+- **Auto-detect "battery full"** — voltage at top OCV with low current, sustained, resets the SOC to 100%. You can also declare it manually from the menu.
+- **Auto-detect "charger attached"** (LOAD install) — voltage kicks >0.5 V on plug in, drops >0.5 V on unplug. Hysteresis filters the LFP rebond.
+- **Smoothed watts & autonomy** — EWMA on the current so a cycling fridge doesn't make the display jump.
+- **Configurable at build time** — cell count, wiring topology, voltage window. See `platformio.ini`.
 
 ## Screenshots
 
@@ -45,50 +45,56 @@ BaMe watches voltage and current, figures out over time how much energy actually
 
 ## How it works
 
-### Calibration
+### Wiring
 
-Between two moments where the battery is truly at rest, BaMe measures how many coulombs flowed and how far the SOC dropped — the ratio gives the real capacity. Segments start short (2 minutes) and double each cycle, so the estimate sharpens quickly then keeps refining. Every completed segment is weighted by its delta SOC, so long discharges count more than short ones.
+Two topologies, picked at compile time.
 
-A segment is dropped if the battery gets recharged mid-way (>1A sustained). Brief current spikes from a fridge compressor or pump are tolerated.
+- **BUS** — shunt is on the battery bus, every current (load and charge) flows through it. Coulomb counting is bidirectional. The natural choice when you build from scratch.
+- **LOAD** — shunt is on the load side, charger bypasses it. BaMe never sees charge current. Used when retrofitting into an existing install.
 
-### Detecting "real rest"
+### Capacity measurement
 
-LFP cells need a quiet window to show their true voltage. BaMe only trusts a reading when the voltage has settled and the current has stayed low — not just at one instant, but continuously over the recent past. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
+When the battery goes from full to BMS cutoff, the Ah delivered through the shunt (BUS) or off a full reference (LOAD) is the measured capacity for that cycle. Multiple cycles blend into a running estimate. Until the first cycle completes, BaMe shows the sticker value with a `*`.
 
-### Steady watts and autonomy
+### SOC uncertainty
 
-A fridge compressor pulsing on and off would normally make the watts and "time remaining" readings jump all over the place. BaMe smooths them out so you see the real average draw, not the instantaneous spikes.
+Voltage never "corrects" the coulomb counter — LFP's flat curve makes that correction actively harmful. If something happens BaMe can't quantify (LOAD install with an invisible partial charge, or missing events after a reset), a `?` appears next to the Ah reading to flag that the displayed SOC drifted from reality. The next confirmed "battery full" event clears it.
 
-### SOC estimation
+### Events BaMe listens for
 
-When rest is confirmed, the SOC nudges toward the voltage-based estimate (8% blend). That corrects the slow drift of coulomb counting without jumping around on the flat middle of the LFP curve.
-
-### Voltage calibration
-
-The top-of-charge reference converges toward the actual observed rest voltage, so the SOC curve adapts to your specific pack without you touching anything.
+- **Full** — voltage ≥ top OCV with rest current, sustained → SOC = 100%, start of a new cycle
+- **BMS cutoff** — voltage collapses → close the cycle, record the capacity sample
+- **Charger plug / unplug** (LOAD only) — rapid voltage rise / drop, detected via a slow-moving average that can't keep up with real chargers
 
 ## Build
 
-Requires [PlatformIO](https://platformio.org/).
+[PlatformIO](https://platformio.org/) wrapped in a small Makefile. See [QUICKSTART.md](QUICKSTART.md) for the quick path.
 
 ```bash
-# Prototype (Arduino Nano)
-pio run -e nano -t upload
-
-# Production (ATmega328PB + USBasp)
-pio run -e prod -t upload
+make                     # build the default env (nano-bus-4s)
+make upload              # upload over USB
+make ENV=nano-load-4s upload
+make list-envs           # show all available variants
 ```
+
+Each env name encodes hardware × wiring × cell count (e.g. `nano-load-4s` = Arduino Nano, LOAD install, 4-cell LFP / 12 V).
 
 ## Controls
 
 | Action | Effect |
 |--------|--------|
-| Hold center 0.5s | Open settings menu |
-| Hold center 3s | Enter deep sleep |
-| Hold any button at boot 5s | Keypad calibration |
-| UP/DOWN in menu | Navigate / change value |
-| CENTER in menu | Enter edit / save |
-| LEFT in menu | Cancel edit / go back |
+| Hold CENTER 0.5 s | Open settings menu |
+| In menu: UP / DOWN | Navigate / increment / decrement |
+| In menu: CENTER | Enter edit / confirm action |
+| In menu: LEFT | Cancel edit / exit menu |
+| Hold any button at boot 5 s | Keypad re-calibration |
+
+## Settings menu
+
+- **Capacity** — sticker value of your battery (Ah). Used as the starting reference until a cycle measures the real capacity.
+- **Battery full** — manual declaration that the battery is at 100%. Use after a charge that didn't trigger the auto-detect.
+- **Reset ALL** — wipes EEPROM (capacity, coulomb count, keypad) and reboots.
+- Last row — voltage + SOC% read-only, useful as a quick info row.
 
 ## License
 

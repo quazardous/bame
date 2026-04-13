@@ -91,22 +91,26 @@ Available variants (run `make list-envs`):
 - `prod-load-4s`  — production board, 12 V LOAD
 - `prod-bus-8s`   — production board, 24 V BUS
 
-## 4. Configure on first boot
+## 5. First boot + settings menu
 
-A few things stay runtime-configurable via the menu (long-press CENTER):
+Long-press CENTER to open the settings menu. Items:
 
-- **Capacity (Ah)** — the sticker value of your battery. The firmware will
-  refine this over time via calibration; the user setting is just the
-  starting point and the value reset-to.
-- **V min / V max utile** (full build only) — your "safe" voltage window.
-  Defaults to LFP nominal (3.00 V/cell low, 3.40 V/cell rest-OCV high).
-- **Eco mode** (full build only) — toggles deep sleep on inactivity.
+- **Capacity (Ah)** — sticker value of your battery. Used as the starting
+  reference until a discharge cycle to BMS cutoff measures the real
+  capacity and replaces it (the `*` next to the capacity display goes away
+  at that point).
+- **Battery full** — manual "SOC = 100%" declaration. Use after a charge
+  that didn't trigger the auto-detect (= the charging icon didn't appear),
+  or to clear a `?` next to the Ah reading.
+- **Reset ALL** — wipes EEPROM (capacity, coulomb count, keypad
+  calibration) and reboots.
 
-What was a menu item but is now compile-time:
-- **Cell count** → set via `BAME_CELLS` at build, no menu item.
-- **Wiring** → set via `BAME_WIRING_BUS`, no menu item.
+Compile-time (set at build via `platformio.ini`, not in the menu):
 
-## 5. Add your own env (custom cell count etc.)
+- **Cell count** → `BAME_CELLS`
+- **Wiring** → `BAME_WIRING_BUS` (1 for BUS, 0 for LOAD)
+
+## 6. Add your own env (custom cell count etc.)
 
 Open `platformio.ini`, copy any `[env:*]` block, change the env name and
 the `-DBAME_CELLS=<n>` / `-DBAME_WIRING_BUS=<0|1>` flags. That's it.
@@ -117,20 +121,31 @@ extends = hw_nano
 build_flags = ${hw_nano.board_flags} -DBAME_WIRING_BUS=1 -DBAME_CELLS=7
 ```
 
-You can also override the user voltage window at build time if your pack
-runs outside the LFP defaults:
+## 7. Simulator (optional)
 
+`sim/calibration_sim.py` drives the real C core (loaded as a shared
+library via ctypes) against a synthetic LFP battery, so you can check how
+the firmware will behave on a full → cutoff → recharge cycle without
+waiting hours for your real pack to go through it.
+
+```bash
+make core-lib     # compile sim/bame_core.dll once
+make sim-cal      # run a multi-cycle convergence test
 ```
-build_flags = ... -DBAME_VMIN_UTILE=12.5 -DBAME_VMAX_UTILE=14.0
-```
 
-## 6. What if something goes wrong
+The sim and firmware share the same `src/bame_core.c` — there's no Python
+re-implementation to keep in sync.
 
-- The flash usage is printed at the end of every `pio run` — if the
-  ATmega328PB prod build hits 100% you've added too much code.
-- Calibration takes multiple full discharge → rest cycles to converge.
-  See `sim/calibration_sim.py` if you want to play with the algorithm
-  offline.
-- Source of truth for the firmware behavior is `src/main.cpp`. Each major
-  block (display, calibration, trend detection) has a long comment at the
-  top explaining what it does and why.
+## 8. What if something goes wrong
+
+- `?` next to the Ah reading → SOC drifted from reality (e.g. invisible
+  charge in LOAD mode). Do a complete charge until the charging icon
+  appears and sticks, or declare "Battery full" manually. Both clear the
+  `?`.
+- `*` next to the capacity at rest → no cycle measured yet. Run one full
+  charge → full discharge cycle and it'll disappear.
+- Icon doesn't show when the charger is on (LOAD mode) → voltage needs to
+  be ≥ top OCV (3.40 V/cell, = 13.6 V on 4S) with rest current, sustained.
+  Charger at CV phase pushing 14.4 V should trigger it within ~30 s.
+- Source of truth for the firmware behavior is `src/bame_core.c` +
+  `src/main.cpp`. The core algorithm is only ~200 lines of pure C.
