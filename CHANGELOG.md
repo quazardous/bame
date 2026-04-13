@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.0-wip
+
+Major direction change. v1 trusted voltage to estimate SOC and to calibrate capacity via discharge segments — but on the LFP flat curve voltage barely moves between 30% and 90% SOC, so the firmware kept "correcting" the SOC reading back to ~90% even when the battery was actually almost empty. Battery dies, no warning.
+
+v2 drops voltage-based SOC entirely. Coulomb counting is the only source of SOC. Voltage is kept only for display and for detecting two events: charger disconnect at top → "battery full" (sets SOC to 100%), and voltage collapse to ~0 → "BMS cutoff = battery empty" (records the Ah delivered as a capacity sample). Average over cycles to refine capacity. Deep sleep goes away (we can't integrate while asleep).
+
+The v1 line lives on in branch `v1` for the experiments that kept relying on voltage. See `ROADMAP.md`.
+
 ## v1.18
 
 - Charge detection now branches on install topology, set at compile time:

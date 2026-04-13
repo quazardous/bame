@@ -2,10 +2,8 @@
 
 Ideas not yet implemented. No timeline.
 
-## Full-cycle coulomb counter
+## v2 — pure coulomb counting
 
-Direct brute measurement of Ah delivered between charger removal and BMS cutoff, as a ground-truth check against the calibrated capacity. Incompatible with deep sleep; flash budget tight on prod.
+Drop voltage-based SOC estimation and the segment-based capacity calibration. The current sensor is the only source of truth for SOC. Voltage stays as a display value and is used only for two events: detecting "battery full" (charger disconnect at top voltage) and "battery empty" (BMS cutoff = voltage drops to ~0). The Ah counted between those two events IS the measured capacity for that cycle. Average across cycles to refine. Always-on (no deep sleep — can't integrate while asleep).
 
-## Split Vmin tracking
-
-Two observed Vmin values: one updated from any reading (under load, informational), one updated only at confirmed rest (reliable reference for the full-cycle counter).
+The v1 line (voltage SOC blend + segment calibration) lives on in branch `v1` for users who can't tolerate manual cycles.

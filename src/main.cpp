@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.18"
+#define BAME_VERSION "2.0-wip"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
