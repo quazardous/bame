@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.13
+
+- Tuned trend detection for realistic glaciere cycles: buffer 16→8 samples (80s window), slope threshold 10→5 mV/step. Catches 100 mV voltage swings that previously went undetected.
+- Flat chrono replaces the stability-spread gate: calibration opens only after the voltage slope has stayed flat for 60s (configurable via FLAT_COUNTDOWN_MS).
+- Retro-range back-dating: when the slope just flipped to flat, scan the buffer backwards and count how many newest samples stay within 20 mV. Backdate flatSince by that much so the chrono finishes sooner when the voltage was already quiet.
+- Optimistic segment open (dev): calStartVoltage is set as soon as flat is detected, not after the full chrono. Discarded if the slope reverts before any discharge.
+- Preempt / commit / rollback (dev): when the coulomb target is reached and the chrono starts, freeze a candidate segment end (voltage, coulombs). Commit on chrono elapse, rollback on voltage movement — lets the window extend naturally when no stable rest is available, improving the ratio Ah / ΔSOC%.
+- Display: always-visible cal counter (blinks while waiting for rest), 60→0 flat countdown where the arrow would be, cleaner rendering order (one setTextSize(1) pass for everything after the big numbers).
+- Trend detection parameters promoted to documented #defines at the top of main.cpp, compile-time folded Sx / D for the regression.
+- Prod build: chrono + retro + preempt + cal-counter + countdown all gated behind #if BAME_DEV. Prod falls back to a direct stableRest gate and single-shot segment save to fit in flash.
+- Python simulator (sim/trend_sim.py): ports the firmware logic including retro-range back-dating, stable-zone enter/exit events, and a glaciere cycle profile for parameter tuning.
+
 ## v1.12
 
 - Voltage trend: linear regression over the full 16-sample buffer (slope in V/10s) replaces the split-average approximation

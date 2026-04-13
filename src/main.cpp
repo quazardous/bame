@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.12"
+#define BAME_VERSION "1.13"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -54,6 +54,42 @@
 #define LFP_CELL_VMAX_UTILE 3.40  // default user practical max per cell (rest OCV at 100%)
 #define VBAT_CONVERGE_FAST 0.04   // fast Vmin/Vmax convergence (~23 readings to move 1%, optimized from 0.01)
 #define VBAT_CONVERGE_SLOW 0.001  // slow convergence (continuous adjustment)
+
+// --- Voltage trend detection (linear regression over a ring buffer) ---
+// The firmware samples voltage every VHIST_INTERVAL_MS into a VHIST_SIZE buffer,
+// then computes a least-squares slope (in volts per sample step). The slope is
+// compared against VHIST_SLOPE_THRESHOLD to decide up/down/flat.
+//
+// VHIST_SIZE = 8 samples × 10s = 80s observation window.
+//   Tuned against sim/trend_sim.py on a realistic glaciere cycle
+//   (13.30V idle → 13.20V load → log recovery to 13.30V over ~3 min).
+//   16 samples (160s) averages the slope too much: a 100mV swing
+//   produces only ±5mV/step and the trend never triggers. 8 samples
+//   captures the same swing at ±8-12mV/step with ~20s detection latency.
+//
+// VHIST_SLOPE_THRESHOLD = 0.005 V/step = 0.5 mV/s average rate.
+//   Sim shows a 100mV glaciere drop peaks at ~-10mV/step and the log
+//   recovery peaks at ~+5mV/step — 0.005 catches both. A higher
+//   threshold (0.010) misses the recovery; a lower one (0.003)
+//   starts reacting to INA226 noise at rest.
+//
+// FLAT_COUNTDOWN_MS = 60s before the flat indicator vanishes.
+//   Arbitrary, visible to the user — it's just the chrono shown on
+//   screen while the arrow is flat; not used by the calibration gate.
+#define VHIST_SIZE             8
+#define VHIST_INTERVAL_MS      10000UL
+#define VHIST_SLOPE_THRESHOLD  0.005f
+#define FLAT_COUNTDOWN_MS      60000UL
+// When voltageTrend flips to flat, scan the buffer backwards: count the newest
+// samples that stay within FLAT_RETRO_SPREAD volts of each other, and backdate
+// flatSince accordingly. Lets the chrono finish sooner when voltage was
+// already quiet in the history.
+#define FLAT_RETRO_SPREAD      0.020f
+
+// Linear-regression denominators for x = 0..VHIST_SIZE-1 (compile-time folded).
+#define VHIST_SX  ((VHIST_SIZE) * ((VHIST_SIZE) - 1) / 2)
+#define VHIST_SXX ((VHIST_SIZE) * ((VHIST_SIZE) - 1) * (2 * (VHIST_SIZE) - 1) / 6)
+#define VHIST_D   ((long)(VHIST_SIZE) * (VHIST_SXX) - (long)(VHIST_SX) * (VHIST_SX))
 
 // EEPROM layout for voltage calibration (after keypad: addr 11+)
 #define EEPROM_VCAL_MAGIC_ADDR 12
@@ -106,6 +142,14 @@ float calChargeSec = 0;         // seconds of sustained charging
 float calTarget = 0;            // coulomb target (0 = initial time mode)
 float calStartVoltage = 0;      // rest voltage at segment start
 unsigned long calStartMs = 0;   // segment start timestamp
+#if BAME_DEV
+// Preempted segment end (dev-only, flash-heavy): flagged when target reached
+// AND chrono just started. If chrono elapses, commit. If voltage moves first,
+// rollback (extend segment).
+float pendingEndVoltage = 0;
+float pendingEndCoulombs = 0;   // 0 when no preempt pending
+unsigned long pendingEndMs = 0;
+#endif
 #define CAL_INITIAL_TIME_MS  120000  // 2 min for first step (longer = bigger delta SOC = better first estimate)
 #define CAL_MIN_COULOMBS     500.0   // ~0.14Ah minimum (INA226 precision)
 
@@ -117,8 +161,9 @@ bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
 bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
 int8_t voltageTrend = 0;             // slope sign: -1 down, 0 flat, +1 up
 float bufMin = 0;                    // min voltage over sample buffer (0 until full)
-float bufMax = 0;                    // max voltage over sample buffer
-float stability = 0;                 // bufMax - bufMin (rest proxy)
+#if BAME_DEV
+unsigned long flatSince = 0;         // last time arrow was up/down; drives calibration rest gate + display chrono
+#endif
 
 // --- Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -301,6 +346,9 @@ inline void resetCalibration() {
   calCoulombs = 0;
   calTarget = 0;
   calStartVoltage = 0;
+#if BAME_DEV
+  pendingEndCoulombs = 0;
+#endif
 }
 
 // --- Voltage calibration EEPROM ---
@@ -769,18 +817,15 @@ void updateMeasurements() {
     calChargeSec = 0;
   }
 
-  // 4) Voltage buffer analysis: linear regression slope + variance
-  //    Stats computed only once the 16-sample (160s) buffer is full.
-  //    slope → trend; bufMax-bufMin → stability (rest proxy).
-  #define VHIST_SIZE 16
-  #define VHIST_INTERVAL 10000UL
+  // 4) Voltage buffer analysis: linear regression slope + spread.
+  //    Stats computed once the VHIST_SIZE buffer is full (see defines at top).
   {
     static float vhist[VHIST_SIZE];
     static uint8_t vhistIdx = 0;
     static uint8_t vhistCount = 0;
     static unsigned long vhistLastMs = 0;
 
-    if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL) {
+    if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL_MS) {
       vhist[vhistIdx] = voltage;
       vhistIdx = (vhistIdx + 1) % VHIST_SIZE;
       if (vhistCount < VHIST_SIZE) vhistCount++;
@@ -790,18 +835,17 @@ void updateMeasurements() {
     if (vhistCount == VHIST_SIZE) {
       uint8_t startIdx = vhistIdx; // oldest sample (buffer full)
       float sumY = 0, sumIY = 0;
-      bufMin = bufMax = vhist[startIdx];
+      bufMin = vhist[startIdx];
       for (uint8_t i = 0; i < VHIST_SIZE; i++) {
         float v = vhist[(startIdx + i) % VHIST_SIZE];
         sumY  += v;
         sumIY += (float)i * v;
         if (v < bufMin) bufMin = v;
-        if (v > bufMax) bufMax = v;
       }
-      // slope in V per 10s step. Sx=sum(0..15)=120, D=N*sum(i^2)-Sx^2=5440
-      float slope = (VHIST_SIZE * sumIY - 120.0f * sumY) / 5440.0f;
-      stability = bufMax - bufMin;
-      voltageTrend = (slope > 0.010f) ? 1 : (slope < -0.010f) ? -1 : 0;
+      // slope in V per 10s step, using compile-time folded Sx/D.
+      float slope = ((float)VHIST_SIZE * sumIY - (float)VHIST_SX * sumY) / (float)VHIST_D;
+      voltageTrend = (slope > VHIST_SLOPE_THRESHOLD) ? 1
+                   : (slope < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
     }
@@ -809,12 +853,75 @@ void updateMeasurements() {
     if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;
 
     if (externalChargeDetected) resetCalibration();
+
+#if BAME_DEV
+    // Flat chrono (dev-only, flash-heavy): tracks how long the arrow has been
+    // "flat" (neither up nor down). Once (now - flatSince) >= FLAT_COUNTDOWN_MS,
+    // the rest gate opens (stableRest, see below). Two paths keep flatSince
+    // up to date:
+    //
+    //  (a) Reset to now whenever the arrow is NOT flat, or the buffer is
+    //      still warming up (bufMin == 0 means we haven't computed a slope
+    //      yet, so "flat" is meaningless).
+    //
+    //  (b) Back-dating when the arrow IS flat: scan the sample buffer from
+    //      the newest sample backwards, counting consecutive samples whose
+    //      range (max - min) stays within FLAT_RETRO_SPREAD volts. That
+    //      gives the length of the "quiet tail" already present in history.
+    //      Range is used instead of std dev: on N <= 8 post-INA226-averaging
+    //      samples the noise is near-gaussian and small, so range ≈ 4·σ.
+    //      Only pulls flatSince earlier, never later, so a long steady
+    //      chrono already in progress is not shortened.
+    if (voltageTrend != 0 || bufMin == 0) {
+      flatSince = now;
+    } else if (vhistCount == VHIST_SIZE) {
+      uint8_t newest = (vhistIdx + VHIST_SIZE - 1) % VHIST_SIZE;
+      float tMin = vhist[newest];
+      float tMax = tMin;
+      uint8_t flatCount = 1;
+      for (uint8_t back = 1; back < VHIST_SIZE; back++) {
+        uint8_t idx = (newest + VHIST_SIZE - back) % VHIST_SIZE;
+        float v = vhist[idx];
+        if (v < tMin) tMin = v;
+        if (v > tMax) tMax = v;
+        if (tMax - tMin > FLAT_RETRO_SPREAD) break;
+        flatCount++;
+      }
+      unsigned long backdated = now - (unsigned long)(flatCount - 1) * VHIST_INTERVAL_MS;
+      if ((long)(backdated - flatSince) < 0) flatSince = backdated;
+    }
+#endif
   }
 
-  // 5) Rest detection: stability gate (buffer spread < 20mV) replaces 5s timer.
+  // 5) Rest detection + segment save.
+  // Dev build uses the flat chrono (optimistic open, preempt/commit/rollback).
+  // Prod build uses a simpler direct gate to fit in flash.
+#if BAME_DEV
+  //   flatNow    = flat slope detected NOW (chrono started) → optimistic open
+  //   stableRest = flat slope confirmed for the full chrono → SOC blend + save
+  // If flatNow reverts before chrono elapses AND no discharge happened, the
+  // optimistic calStartVoltage is discarded.
+  bool flatNow = (abs(current) < VBAT_REST_CURRENT)
+              && (bufMin > 0)
+              && (voltageTrend == 0);
+  bool stableRest = flatNow && (now - flatSince >= FLAT_COUNTDOWN_MS);
+
+  // Optimistic segment open on chrono start (don't wait 60s).
+  if (flatNow && !externalChargeDetected && calStartVoltage == 0) {
+    calStartVoltage = voltage;
+    calStartMs = now;
+  }
+  // Discard optimistic open if flat reverted without any discharge flowing.
+  if (voltageTrend != 0 && calStartVoltage > 0 && calCoulombs == 0
+      && now - flatSince < FLAT_COUNTDOWN_MS) {
+    calStartVoltage = 0;
+  }
+#else
+  // Prod: direct gate — current low AND slope flat AND buffer warm.
   bool stableRest = (abs(current) < VBAT_REST_CURRENT)
                  && (bufMin > 0)
-                 && (stability < 0.020f);
+                 && (voltageTrend == 0);
+#endif
 
   if (stableRest && !externalChargeDetected) {
     float socV = socFromVoltage(voltage);
@@ -823,11 +930,13 @@ void updateMeasurements() {
     // Auto-zero current offset
     float raw = current + currentOffset;
     currentOffset = currentOffset * 0.9 + raw * 0.1;
-    // Initialize segment start if not set yet
+#if !BAME_DEV
+    // Prod: init segment start on first stable rest (dev does it optimistically above).
     if (calStartVoltage == 0) {
       calStartVoltage = voltage;
       calStartMs = now;
     }
+#endif
     // Slow Vmax convergence toward observed rest voltage
     if (current >= -VBAT_REST_CURRENT && voltage > vbatTop * 0.98f) {
       float conv = (voltage > vbatTop) ? VBAT_CONVERGE_FAST : VBAT_CONVERGE_SLOW;
@@ -835,47 +944,71 @@ void updateMeasurements() {
     }
   }
 
-  // 5) Calibration save: target reached AND buffer-stable rest AND valid segment
+  // Segment end gate: target reached?
   bool calTargetReached;
   if (calTarget <= 0) {
-    // Initial time mode: 1 min AND minimum coulombs
     calTargetReached = (now - calStartMs >= CAL_INITIAL_TIME_MS)
                     && (calCoulombs >= CAL_MIN_COULOMBS);
   } else {
-    // Doubling mode: coulomb target
     calTargetReached = (calCoulombs >= calTarget);
   }
 
+#if BAME_DEV
+  // --- Dev: preempt / commit / rollback ---
+  // Preempt: target reached AND flat just detected → freeze candidate end.
   if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0
-      && stableRest) {
-    float vEnd = voltage;
+      && flatNow && !externalChargeDetected
+      && pendingEndCoulombs == 0) {
+    pendingEndVoltage = voltage;
+    pendingEndCoulombs = calCoulombs;
+    pendingEndMs = now;
+    calCoulombs = 0;
+  }
+  // Rollback: voltage moved before chrono elapsed → extend previous segment.
+  if (pendingEndCoulombs > 0 && voltageTrend != 0
+      && now - flatSince < FLAT_COUNTDOWN_MS) {
+    calCoulombs += pendingEndCoulombs;
+    pendingEndCoulombs = 0;
+  }
+  // Commit: chrono elapsed while pending → finalize segment with preempted end.
+  if (pendingEndCoulombs > 0 && stableRest && !externalChargeDetected) {
     float socStart = socFromVoltage(calStartVoltage);
-    float socEnd = socFromVoltage(vEnd);
+    float socEnd = socFromVoltage(pendingEndVoltage);
     float deltaSoc = socStart - socEnd;
-
-    // Estimate capacity if delta SOC is meaningful
     if (deltaSoc > 5.0) {
-      float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
+      float estAh = (pendingEndCoulombs / 3600.0) / (deltaSoc / 100.0);
       if (estAh > CAPACITY_MIN && estAh < CAPACITY_MAX) {
-        // Unified weighted convergence: weight proportional to delta SOC
         float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
         setCapacity(batteryCapacityAh * (1.0 - weight) + estAh * weight);
         saveCapToEEPROM();
       }
     }
-
-    // Save quality of completed cycle
-
-    // Save voltage calibration at end of cycle (not periodically)
     saveVcalToEEPROM();
-
-    // Double the target for the next step
+    calTarget = pendingEndCoulombs * 2.0;
+    calStartVoltage = pendingEndVoltage;
+    calStartMs = pendingEndMs;
+    pendingEndCoulombs = 0;
+  }
+#else
+  // --- Prod: single-shot save when target reached AND currently at rest ---
+  if (calTargetReached && calStartVoltage > 0 && calCoulombs > 0 && stableRest) {
+    float vEnd = voltage;
+    float deltaSoc = socFromVoltage(calStartVoltage) - socFromVoltage(vEnd);
+    if (deltaSoc > 5.0) {
+      float estAh = (calCoulombs / 3600.0) / (deltaSoc / 100.0);
+      if (estAh > CAPACITY_MIN && estAh < CAPACITY_MAX) {
+        float weight = constrain(deltaSoc / 100.0, 0.05, 0.5);
+        setCapacity(batteryCapacityAh * (1.0 - weight) + estAh * weight);
+        saveCapToEEPROM();
+      }
+    }
+    saveVcalToEEPROM();
     calTarget = calCoulombs * 2.0;
-    // New segment starts from current rest voltage
     calStartVoltage = vEnd;
     calStartMs = now;
     calCoulombs = 0;
   }
+#endif
 }
 
 void updateDisplay() {
@@ -905,7 +1038,14 @@ void updateDisplay() {
   display.print(ahInt);
   display.setCursor(SCREEN_W - 54, BLUE_Y + 2);
   display.print(voltage, 1);
-  // Voltage trend arrow (left of voltage)
+  // Everything after this is size 1 (suffixes, countdown, line 2, line 3).
+  display.setTextSize(1);
+  display.setCursor(ahDigits * 12, BLUE_Y + 2);
+  display.print(F("Ah"));
+  display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
+  display.print(F("V"));
+  // Voltage trend arrow (left of voltage). In dev, also shows 60→0 chrono
+  // countdown while flat (flatSince is maintained by updateMeasurements).
   {
     int16_t ax = SCREEN_W - 66;
     int16_t ay = BLUE_Y + 6;
@@ -913,13 +1053,17 @@ void updateDisplay() {
       display.fillTriangle(ax, ay + 6, ax + 4, ay, ax + 8, ay + 6, SSD1306_WHITE);
     else if (voltageTrend < 0)
       display.fillTriangle(ax, ay, ax + 8, ay, ax + 4, ay + 6, SSD1306_WHITE);
+#if BAME_DEV
+    else if (bufMin > 0) {
+      uint32_t elapsed_ms = millis() - flatSince;
+      if (elapsed_ms < FLAT_COUNTDOWN_MS) {
+        uint8_t remaining = (FLAT_COUNTDOWN_MS / 1000) - (uint8_t)(elapsed_ms / 1000);
+        display.setCursor(remaining < 10 ? ax + 2 : ax - 4, ay);
+        display.print(remaining);
+      }
+    }
+#endif
   }
-  // Size 1 pass: both suffixes + line 2
-  display.setTextSize(1);
-  display.setCursor(ahDigits * 12, BLUE_Y + 2);
-  display.print(F("Ah"));
-  display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
-  display.print(F("V"));
 
   // Line 2: Power + current
   display.setCursor(0, BLUE_Y + 22);
@@ -963,26 +1107,29 @@ void updateDisplay() {
     display.print(':');
     if (m < 10) display.print('0');
     display.print(m);
-    // Calibration counter (append after HH:MM during discharge)
-    if (current > 0 && !autoDeepSleep) {
-      bool needsRest = (calStartVoltage == 0)
-        || ((calTarget > 0) ? (calCoulombs >= calTarget)
-        : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
-      bool blink = (millis() / DISPLAY_INTERVAL_MS) % 2;
-      if (!needsRest || blink) {
-        display.setCursor(50, ty);
-        float calAh = calCoulombs / 3600.0;
-        if (calAh >= 10.0) display.print((int)calAh);
-        else display.print(calAh, 1);
-        display.print(F("Ah"));
-      }
-    }
   } else if (!autoDeepSleep) {
     // At rest: show estimated capacity
     display.setCursor(0, ty);
     display.print((int)batteryCapacityAh);
     display.print(F("Ah"));
   }
+
+#if BAME_DEV
+  // Calibration counter (dev only, flash-heavy): blinks waiting for stable rest.
+  if (!autoDeepSleep) {
+    bool needsRest = (calStartVoltage == 0)
+      || ((calTarget > 0) ? (calCoulombs >= calTarget)
+      : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
+    bool blink = (millis() / DISPLAY_INTERVAL_MS) % 2;
+    if (!needsRest || blink) {
+      display.setCursor(50, ty);
+      float calAh = calCoulombs / 3600.0;
+      if (calAh >= 10.0) display.print((int)calAh);
+      else display.print(calAh, 1);
+      display.print(F("Ah"));
+    }
+  }
+#endif
 
   // Bottom right: battery icon — charging (partial, blinking) or full (static)
   if (externalChargeDetected) {
