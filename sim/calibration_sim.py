@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BAME Calibration Simulator
+BaMe Calibration Simulator
 
 Simulates a LFP battery with known true capacity and runs the exact same
 calibration algorithm as the firmware to validate convergence.
@@ -398,7 +398,7 @@ def run_simulation(true_ah, nominal_ah, cells, noise, scenario_name):
     cal.soc_percent = cal.soc_from_voltage(v_init)
     cal.coulomb_count = (cal.soc_percent / 100.0) * cal.estimated_as
 
-    print(f"=== BAME Calibration Simulation ===")
+    print(f"=== BaMe Calibration Simulation ===")
     print(f"True capacity:    {true_ah} Ah")
     print(f"Nominal capacity: {nominal_ah} Ah")
     print(f"Cells:            {cells}S")
@@ -454,7 +454,7 @@ def run_simulation(true_ah, nominal_ah, cells, noise, scenario_name):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='BAME calibration simulator')
+    parser = argparse.ArgumentParser(description='BaMe calibration simulator')
     parser.add_argument('--capacity', type=float, default=50, help='True battery capacity in Ah')
     parser.add_argument('--nominal', type=float, default=80, help='Nominal (user-set) capacity in Ah')
     parser.add_argument('--cells', type=int, default=4, help='Cell count (S)')

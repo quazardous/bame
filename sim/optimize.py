@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Genetic optimizer for BAME calibration parameters.
+Genetic optimizer for BaMe calibration parameters.
 
 Evolves the best parameter set by running the calibration simulation
 across multiple scenarios and minimizing capacity estimation error.
@@ -255,7 +255,7 @@ def format_genome(genome):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Optimize BAME calibration parameters')
+    parser = argparse.ArgumentParser(description='Optimize BaMe calibration parameters')
     parser.add_argument('--generations', type=int, default=30, help='Number of generations')
     parser.add_argument('--population', type=int, default=30, help='Population size')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -278,7 +278,7 @@ def main():
     best_ever = None
     best_fitness = float('inf')
 
-    print(f"=== BAME Parameter Optimizer ===")
+    print(f"=== BaMe Parameter Optimizer ===")
     print(f"Population: {pop_size}, Generations: {args.generations}")
     print(f"Test cases: {sum(len(tc[3]) for tc in TEST_CASES)} scenarios")
     print()

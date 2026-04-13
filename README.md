@@ -1,6 +1,6 @@
 # BaMe - Battery Meter
 
-A small battery monitor for the cheap, unbranded LiFePO4 packs you find in camping vans, solar setups and off-grid boxes. Those batteries don't talk — no BMS output, no datasheet, often a capacity that's generously rounded up. BAME watches the current and voltage and figures out, over time, how much energy actually fits inside.
+A small battery monitor for the cheap, unbranded LiFePO4 packs you find in camping vans, solar setups and off-grid boxes. Those batteries don't talk — no BMS output, no datasheet, often a capacity that's generously rounded up. BaMe watches the current and voltage and figures out, over time, how much energy actually fits inside.
 
 Plug it in on your 12V/24V line with an INA226 shunt and an OLED, tell it roughly how many cells are in series and the nominal Ah written on the sticker, then forget about it. As you use the battery normally, each discharge + rest cycle refines the real capacity estimate and the State of Charge stays honest.
 
@@ -43,17 +43,17 @@ Plug it in on your 12V/24V line with an INA226 shunt and an OLED, tell it roughl
 
 ### Calibration
 
-Between two moments where the battery is truly at rest, BAME measures how many coulombs flowed and how far the SOC dropped — the ratio gives the real capacity. Segments start short (2 minutes) and double each cycle, so the estimate sharpens quickly then keeps refining. Every completed segment is weighted by its delta SOC, so long discharges count more than short ones.
+Between two moments where the battery is truly at rest, BaMe measures how many coulombs flowed and how far the SOC dropped — the ratio gives the real capacity. Segments start short (2 minutes) and double each cycle, so the estimate sharpens quickly then keeps refining. Every completed segment is weighted by its delta SOC, so long discharges count more than short ones.
 
 A segment is dropped if the battery gets recharged mid-way (>1A sustained). Brief current spikes from a fridge compressor or pump are tolerated.
 
 ### Detecting "real rest"
 
-LFP cells need a quiet window to show their true voltage. BAME only trusts a reading when the voltage has settled and the current has stayed low — not just at one instant, but continuously over the recent past. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
+LFP cells need a quiet window to show their true voltage. BaMe only trusts a reading when the voltage has settled and the current has stayed low — not just at one instant, but continuously over the recent past. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
 
 ### Steady watts and autonomy
 
-A fridge compressor pulsing on and off would normally make the watts and "time remaining" readings jump all over the place. BAME smooths them out so you see the real average draw, not the instantaneous spikes.
+A fridge compressor pulsing on and off would normally make the watts and "time remaining" readings jump all over the place. BaMe smooths them out so you see the real average draw, not the instantaneous spikes.
 
 ### SOC estimation
 

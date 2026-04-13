@@ -1232,7 +1232,7 @@ void setup() {
   #if BAME_DEBUG
   Serial.println(F(""));
   Serial.println(F("========================="));
-  Serial.println(F(" BAME Battery Monitor"));
+  Serial.println(F(" BaMe Battery Meter"));
   Serial.println(F(" LFP " BAME_VERSION));
   Serial.println(F("========================="));
 

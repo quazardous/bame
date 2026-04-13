@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BAME OLED screenshot renderer.
+BaMe OLED screenshot renderer.
 
 Generates PNG screenshots that replicate the firmware display output.
 Targets the PROD build (no dev-only countdown, no cal counter).
@@ -370,7 +370,7 @@ SCREENS = {
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Generate BAME OLED screenshots')
+    parser = argparse.ArgumentParser(description='Generate BaMe OLED screenshots')
     parser.add_argument('--scale', type=int, default=6)
     parser.add_argument('--outdir', default='docs/screenshots')
     args = parser.parse_args()
