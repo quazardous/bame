@@ -41,46 +41,70 @@ def slope_of(buf, Sx, D):
     return (N * sumIY - Sx * sumY) / D
 
 
+def soc_from_voltage(v, v_empty=12.0, v_full=13.6):
+    """Toy linear SOC(%); enough to show blend perturbation."""
+    if v <= v_empty: return 0.0
+    if v >= v_full:  return 100.0
+    return (v - v_empty) / (v_full - v_empty) * 100.0
+
+
 def simulate(profile, duration_s, hist_size, slope_th,
              retro_spread=FLAT_RETRO_SPREAD,
-             current_profile=None, rest_threshold=0.3):
-    """Yield per-sample state.
+             current_profile=None, rest_threshold=0.3,
+             capacity_ah=80.0, initial_soc=85.0, blend_bias=0.0,
+             use_raw=False):
+    """Simulate and yield per-sample state.
 
-    profile(t)          -> voltage at time t
-    current_profile(t)  -> current at time t (optional, default 0 A)
+    Models the SOC blend running at every tick while stable: the voltage-based
+    SOC is blended 8% into socPercent, and coulombCount is recomputed from
+    socPercent × capacity. That's exactly the mechanism that pollutes cAvg
+    when coulombCount is also used as the current buffer.
+
+    use_raw=True: chist[] samples a *separate* raw integrator untouched by the
+    blend (the proposed fix).
 
     Yields: (t, v, slope, trend, cd, stable, retro_k, cAvg, maxSliceI)
     """
     Sx, D = lr_constants(hist_size)
+    capacity_as = capacity_ah * 3600.0
+    soc_percent = initial_soc
+    coulomb_count = (soc_percent / 100.0) * capacity_as  # SOC-corrected integrator
+    coulomb_raw = coulomb_count                          # uncorrected (fix)
     vbuf = []
-    cbuf = []           # coulombCount snapshots (A·s)
-    coulomb_count = 0.0 # running integrator (A·s); sign: decreases on discharge
+    cbuf = []           # snapshots used by the current smoothing
+    push_t = 0
     flat_since = 0
     t = 0
     prev_t = 0
+    # Warmup flag: before the first full buffer, no stable, no blend.
     while t <= duration_s:
-        # Integrate current continuously (at the sample rate in this sim).
         if current_profile is not None:
             i_now = current_profile(t)
             dt = t - prev_t
             coulomb_count -= i_now * dt
+            coulomb_raw   -= i_now * dt
+            # Track socPercent in parallel (matches firmware logic).
+            if capacity_as > 0:
+                soc_percent = max(0.0, min(100.0, coulomb_count / capacity_as * 100.0))
         prev_t = t
 
-        vbuf.append(profile(t))
-        cbuf.append(coulomb_count)
+        v_now = profile(t)
+        vbuf.append(v_now)
+        cbuf.append(coulomb_raw if use_raw else coulomb_count)
         if len(vbuf) > hist_size:
             vbuf.pop(0)
             cbuf.pop(0)
+        push_t = t  # for sliding-2pt age
 
         c_avg = None
         max_slice_i = None
         if len(vbuf) == hist_size:
             slope = slope_of(vbuf, Sx, D)
             trend = 1 if slope > slope_th else -1 if slope < -slope_th else 0
-            # Current: slope on coulomb buffer → average current over window.
-            slope_c = slope_of(cbuf, Sx, D)  # A·s per step
-            c_avg = -slope_c / VHIST_INTERVAL_S
-            # Max current over any 10s slice = max |ΔcoulombCount| / 10s.
+            # Sliding 2-point (matches firmware after the bump): oldest vs live.
+            live = coulomb_raw if use_raw else coulomb_count
+            age_s = hist_size * VHIST_INTERVAL_S  # newest just pushed → ~full span
+            c_avg = -(live - cbuf[0]) / age_s
             max_slice_i = 0
             for i in range(1, hist_size):
                 slice_i = abs(cbuf[i] - cbuf[i - 1]) / VHIST_INTERVAL_S
@@ -90,12 +114,10 @@ def simulate(profile, duration_s, hist_size, slope_th,
             slope = None
             trend = 0
 
-        # Path (a): reset chrono while arrow up/down or buffer warming up.
         retro_k = None
         if trend != 0 or len(vbuf) < hist_size:
             flat_since = t
         elif len(vbuf) == hist_size:
-            # Path (b): retro-range back-dating when flat detected.
             newest = vbuf[-1]
             tMin = tMax = newest
             flat_count = 1
@@ -113,7 +135,6 @@ def simulate(profile, duration_s, hist_size, slope_th,
 
         cd = None
         stable = False
-        # stableRest now also requires maxSliceI < rest_threshold.
         current_clean = (max_slice_i is not None
                          and max_slice_i < rest_threshold)
         if trend == 0 and len(vbuf) == hist_size and current_clean:
@@ -123,7 +144,16 @@ def simulate(profile, duration_s, hist_size, slope_th,
             else:
                 stable = True
 
-        yield (t, vbuf[-1], slope, trend, cd, stable, retro_k, c_avg, max_slice_i)
+        # SOC blend (firmware: runs every tick while stableRest).
+        # Moves coulomb_count toward socFromVoltage × capacity — which creates
+        # the cAvg spike the user is seeing.
+        if stable:
+            soc_v = soc_from_voltage(v_now) + blend_bias
+            soc_percent = soc_percent * 0.92 + soc_v * 0.08
+            coulomb_count = (soc_percent / 100.0) * capacity_as
+            # coulomb_raw untouched — that's the fix.
+
+        yield (t, v_now, slope, trend, cd, stable, retro_k, c_avg, max_slice_i)
         t += VHIST_INTERVAL_S
 
 
@@ -182,6 +212,13 @@ def main():
                     help='glaciere pull current in A (default 5.0)')
     ap.add_argument('--rest-i', type=float, default=0.3,
                     help='rest-current threshold (VBAT_REST_CURRENT)')
+    ap.add_argument('--initial-soc', type=float, default=85.0,
+                    help='initial SOC in percent (default 85)')
+    ap.add_argument('--blend-bias', type=float, default=-10.0,
+                    help='percent bias added to socFromVoltage so the blend '
+                         'creates a visible perturbation (default -10)')
+    ap.add_argument('--use-raw', action='store_true',
+                    help='use the coulombRaw fix (no SOC blend pollution)')
     args = ap.parse_args()
 
     prof = glaciere_profile(args.idle_s, args.drop_s, args.load_s,
@@ -198,18 +235,21 @@ def main():
           f"recovery tau={args.recov_tau}s back to {args.vbase}V")
     print()
     print(f"{'t(s)':>6} {'V':>7} {'slope':>11} {'arw':>4} {'cd':>4} "
-          f"{'retroK':>7} {'cAvg(A)':>8} {'maxSlc':>7} {'stable':>7}")
-    print("-" * 75)
+          f"{'retroK':>7} {'cAvg(A)':>8} {'W':>7} {'maxSlc':>7} {'stable':>7}")
+    print("-" * 85)
     prev_trend = 0
     prev_stable = False
     for t, v, slope, trend, cd, stable, retro_k, c_avg, max_slc in simulate(
             prof, args.duration, args.hist, args.threshold,
-            current_profile=iprof, rest_threshold=args.rest_i):
+            current_profile=iprof, rest_threshold=args.rest_i,
+            initial_soc=args.initial_soc, blend_bias=args.blend_bias,
+            use_raw=args.use_raw):
         slope_s = f"{slope*1000:+6.2f}mV" if slope is not None else "   --"
         arrow = {1: 'UP', -1: 'DOWN', 0: ''}[trend]
         cd_s = f"{cd:2d}" if cd is not None else ""
         retro_s = f"{retro_k}" if retro_k is not None else ""
         c_s = f"{c_avg:+.2f}" if c_avg is not None else ""
+        w_s = f"{abs(c_avg * v):.0f}" if c_avg is not None else ""
         ms_s = f"{max_slc:.2f}" if max_slc is not None else ""
         stable_s = 'STABLE' if stable else ''
         events = []
@@ -219,7 +259,7 @@ def main():
             events.append('ENTER STABLE' if stable else 'EXIT STABLE')
         marker = (' <<< ' + ', '.join(events)) if events else ''
         print(f"{t:6d} {v:7.3f} {slope_s:>11} {arrow:>4} {cd_s:>4} "
-              f"{retro_s:>7} {c_s:>8} {ms_s:>7} {stable_s:>7}{marker}")
+              f"{retro_s:>7} {c_s:>8} {w_s:>7} {ms_s:>7} {stable_s:>7}{marker}")
         prev_trend = trend
         prev_stable = stable
 

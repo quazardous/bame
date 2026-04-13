@@ -49,7 +49,11 @@ A segment is dropped if the battery gets recharged mid-way (>1A sustained). Brie
 
 ### Detecting "real rest"
 
-LFP cells need a quiet window to show their true voltage. BAME keeps a rolling 160-second history and only trusts a reading when the current is low **and** the voltage has stayed flat within 20 mV over that window. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
+LFP cells need a quiet window to show their true voltage. BAME only trusts a reading when the voltage has settled and the current has stayed low — not just at one instant, but continuously over the recent past. That rules out the false calms between compressor cycles, which is where naive monitors get the capacity wrong.
+
+### Steady watts and autonomy
+
+A fridge compressor pulsing on and off would normally make the watts and "time remaining" readings jump all over the place. BAME smooths them out so you see the real average draw, not the instantaneous spikes.
 
 ### SOC estimation
 

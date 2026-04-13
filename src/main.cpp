@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.14"
+#define BAME_VERSION "1.15"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -182,6 +182,10 @@ float current = 0;
 float power = 0;
 float socPercent = 100.0;
 float coulombCount = 0;
+// coulombRaw = pure continuous integrator, NEVER corrected by SOC blend.
+// Used as the source for chist[] so cAvg is not polluted by blend jumps.
+// Renormalized when it exceeds bounds (deltas against chist entries preserved).
+float coulombRaw = 0;
 unsigned long lastMeasure = 0;
 unsigned long lastDisplay = 0;
 
@@ -801,6 +805,7 @@ void updateMeasurements() {
 
   // 2) Coulomb counting
   coulombCount -= current * dtSeconds;
+  coulombRaw   -= current * dtSeconds;  // parallel, no clamp, no blend correction
   if (coulombCount > batteryCapacityAs) coulombCount = batteryCapacityAs;
   if (coulombCount < 0) coulombCount = 0;
   socPercent = (coulombCount / batteryCapacityAs) * 100.0;
@@ -838,8 +843,16 @@ void updateMeasurements() {
     static unsigned long vhistLastMs = 0;
 
     if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL_MS) {
+      // Renormalize coulombRaw to keep float precision bounded: if it drifts
+      // past ±100k A·s, subtract its value from all chist entries AND from
+      // coulombRaw itself — deltas (what cAvg uses) are preserved.
+      if (coulombRaw > 100000.0f || coulombRaw < -100000.0f) {
+        float shift = coulombRaw;
+        for (uint8_t i = 0; i < VHIST_SIZE; i++) chist[i] -= shift;
+        coulombRaw = 0;
+      }
       vhist[vhistIdx] = voltage;
-      chist[vhistIdx] = coulombCount;
+      chist[vhistIdx] = coulombRaw;
       vhistIdx = (vhistIdx + 1) % VHIST_SIZE;
       if (vhistCount < VHIST_SIZE) vhistCount++;
       vhistLastMs = now;
@@ -848,7 +861,6 @@ void updateMeasurements() {
     if (vhistCount == VHIST_SIZE) {
       uint8_t startIdx = vhistIdx; // oldest sample (buffer full)
       float sumY = 0, sumIY = 0;
-      float sumC = 0, sumIC = 0;
       bufMin = vhist[startIdx];
       float prevC = chist[startIdx];
       maxSliceI = 0;
@@ -857,8 +869,6 @@ void updateMeasurements() {
         float c = chist[(startIdx + i) % VHIST_SIZE];
         sumY  += v;
         sumIY += (float)i * v;
-        sumC  += c;
-        sumIC += (float)i * c;
         if (v < bufMin) bufMin = v;
         if (i > 0) {
           // |ΔcoulombCount| / 10s = |average current| over this 10s slice.
@@ -873,10 +883,14 @@ void updateMeasurements() {
                    : (slopeV < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
-      // Current slope in (A·s) / step = -avg_current × VHIST_INTERVAL_S.
-      // Minus sign because coulombCount decreases during discharge.
-      float slopeC = ((float)VHIST_SIZE * sumIC - (float)VHIST_SX * sumC) / (float)VHIST_D;
-      cAvg = -slopeC / (float)(VHIST_INTERVAL_MS / 1000);
+      // Smoothed current: sliding 2-point window against the LIVE coulombRaw.
+      // cAvg refreshes every tick (100 ms), not only on sample push (10 s).
+      // Using coulombRaw (not coulombCount) insulates cAvg from the SOC blend
+      // that corrects coulombCount while stableRest is active.
+      // Age of oldest sample = time since last push + (VHIST_SIZE-1) × interval.
+      unsigned long ageMs = now - vhistLastMs
+                          + (unsigned long)(VHIST_SIZE - 1) * VHIST_INTERVAL_MS;
+      cAvg = -(coulombRaw - chist[startIdx]) * 1000.0f / (float)ageMs;
     }
     // Below 3.375V/cell a charger cannot be active (it imposes higher voltage)
     if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;

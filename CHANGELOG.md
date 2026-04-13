@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.15
+
+- Fixed aberrant watts reading at rest (e.g. 500-1000W). Root cause: the SOC blend was silently rewriting `coulombCount` while rest was active, and the current-smoothing buffer was reading the same variable — every correction showed up as a fake current spike for the full 80s window, which also kicked the rest gate off and made calibration flicker.
+- Introduced `coulombRaw`, a separate pure integrator never touched by the SOC blend. The current buffer (`chist[]`) now samples `coulombRaw` instead of `coulombCount`. `coulombCount` stays corrected for SOC/Ah display.
+- `coulombRaw` renormalizes periodically (past ±100k A·s) by subtracting its value from every chist entry — deltas preserved, float precision stays tight.
+- Replaced the regression slope for `cAvg` with a 2-point sliding window against the live `coulombRaw`, so watts and autonomy refresh every 100ms instead of stepping every 10s.
+- Simulator updated: models the SOC blend, reproduces the 500W+ spike at rest entry, and has a `--use-raw` flag to validate the fix. Also shows a watts column and the STABLE/EXIT events caused by the polluted buffer.
+- README: "How it works" section stays conceptual (no implementation jargon).
+- Screenshots regenerated to target the PROD build (no dev-only cal counter / countdown); the render script now references the corresponding `main.cpp` line numbers for each element.
+
 ## v1.14
 
 - Parallel current buffer sampled at the same 10s cadence as voltage. Stores snapshots of `coulombCount` (continuously integrated at 100 ms), so no aliasing on cyclic loads like a fridge compressor.

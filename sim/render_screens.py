@@ -3,7 +3,11 @@
 BAME OLED screenshot renderer.
 
 Generates PNG screenshots that replicate the firmware display output.
+Targets the PROD build (no dev-only countdown, no cal counter).
 Uses the Adafruit 5x7 font bitmap for pixel-accurate rendering.
+
+Source of truth: src/main.cpp updateDisplay() at line 1045, settingsMenu()
+at line 576. Per-element line references are in the code below.
 
 Usage:
     python sim/render_screens.py [--scale 6] [--outdir docs/screenshots]
@@ -250,31 +254,33 @@ def draw_trend_arrow(d, x, y, direction):
         d.fill_triangle(x, y, x + 8, y, x + 4, y + 6)
 
 
-# --- Main display (mirrors updateDisplay() in src/main.cpp v1.11) ---
+# --- Main display: mirrors updateDisplay() src/main.cpp:1045 (prod build) ---
 
 def _draw_main(d, voltage, current, soc, cap_ah, trend=0, charging_ext=False, eco=False):
     d.clear()
     remaining_ah = int(soc * cap_ah / 100)
 
-    # Yellow: gauge with XOR %
+    # Yellow zone: SOC gauge with XOR %         src/main.cpp:1058 → gfx.drawGauge()
     draw_gauge(d, soc)
 
-    # Line 1: Ah LEFT (size 2) + "Ah", voltage RIGHT (size 2) + "V", trend arrow between
+    # Line 1: big Ah left + big voltage right   src/main.cpp:1063-1077
     ah_str = str(remaining_ah)
     d.text(0, BLUE_Y + 2, ah_str, size=2)
     d.text(len(ah_str) * 12, BLUE_Y + 2, "Ah")
     d.text(W - 54, BLUE_Y + 2, f"{voltage:.1f}", size=2)
     d.text(W - 6, BLUE_Y + 2, "V")
+    # Voltage trend arrow                        src/main.cpp:1078-1097
+    # Prod build stops at fillTriangle (no dev-only countdown fallback).
     draw_trend_arrow(d, W - 66, BLUE_Y + 6, trend)
 
-    # Line 2: power left, current right
+    # Line 2: power (smoothed) left, current right   src/main.cpp:1099-1114
     power = int(abs(voltage * current))
     d.text(0, BLUE_Y + 22, f"{power}W")
     d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
 
-    # Line 3: activity status
+    # Line 3: HH:MM when active, capacity-Ah at rest   src/main.cpp:1118-1152
     ty = BLUE_Y + 37
-    active_i = 0.3  # ACTIVE_CURRENT
+    active_i = 0.5  # ACTIVE_CURRENT (src/main.cpp:47)
     if abs(current) > active_i:
         if current > 0:
             hours_left = (remaining_ah) / current
@@ -286,14 +292,13 @@ def _draw_main(d, voltage, current, soc, cap_ah, trend=0, charging_ext=False, ec
         h = int(hours_left)
         m = int((hours_left - h) * 60)
         d.text(10, ty, f"{h:02d}:{m:02d}")
-        # Discharge + not eco: cal counter appended after HH:MM
-        if current > 0 and not eco:
-            d.text(50, ty, "1.2Ah")
     elif not eco:
-        # At rest: show estimated capacity left
         d.text(0, ty, f"{int(cap_ah)}Ah")
 
-    # Bottom-right battery icon
+    # Dev-only cal counter lives at src/main.cpp:1154-1168 behind #if BAME_DEV,
+    # so prod screenshots don't draw it.
+
+    # Bottom-right battery icon                  src/main.cpp:1170-1176
     if charging_ext:
         draw_charging_battery(d, 106, ty, full=False)  # blinks in reality; drawn steady for snapshot
 
@@ -319,7 +324,9 @@ def screen_no_battery(d):
     d.text(4, BLUE_Y + 12, "No Battery", size=2)
 
 
-# v1.11 menu: Capacity, Cells, V min, V max, Eco mode, Reset ALL, Info V (read-only, last)
+# Settings menu (prod build) — src/main.cpp:576 settingsMenu().
+# Items: Capacity, Cells, V min, V max, Eco mode, Reset ALL, Info V (last, read-only).
+# ITEM_INFO_V is an inline row drawn at src/main.cpp:595-612 (not a drawMenuItem).
 def _draw_info_row(d, row, voltage, vmin, selected=False):
     y = BLUE_Y + row * 8
     if selected:
@@ -330,7 +337,7 @@ def _draw_info_row(d, row, voltage, vmin, selected=False):
 
 def screen_menu(d):
     d.clear()
-    draw_title(d, "Bame v1.14")
+    draw_title(d, "Bame v1.15")  # src/main.cpp:593
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
     draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
@@ -342,7 +349,7 @@ def screen_menu(d):
 
 def screen_menu_edit(d):
     d.clear()
-    draw_title(d, "Bame v1.14")
+    draw_title(d, "Bame v1.15")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
     draw_menu_item(d, 1, ' ', 'Cells', '4S')
     draw_menu_item(d, 2, ' ', 'V min', '12.0V/12.8')
