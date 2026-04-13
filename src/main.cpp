@@ -9,6 +9,8 @@
 #include <Adafruit_SSD1306.h>
 #include <INA226.h>
 #include "BameGFX.h"
+#include "display.h"
+#include "menu.h"
 
 // --- Configuration ---
 #define BAME_VERSION "2.0-wip"
@@ -145,7 +147,7 @@
 // Cell count and dynamic voltages
 // cellCount is fixed at compile time via BAME_CELLS; kept as a const for
 // readability since most call sites refer to it.
-const uint8_t cellCount = BAME_CELLS;
+extern const uint8_t cellCount = BAME_CELLS;
 float vbatTop = LFP_CELL_DEFAULT * LFP_CELL_FULL;    // calibration window upper bound
 float vbatBottom = LFP_CELL_DEFAULT * LFP_CELL_EMPTY; // calibration window lower bound
 
@@ -424,8 +426,11 @@ bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, floa
   return true;
 }
 
-// Estimated capacity (calibration)
-#define saveCapToEEPROM() saveFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)
+// Estimated capacity (calibration). Was a macro — promoted to a real function
+// so the linker can find it from menu.cpp.
+void saveCapToEEPROM() {
+  saveFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh);
+}
 bool loadCapFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_CAP_MAGIC_ADDR, EEPROM_CAP_MAGIC_VAL, EEPROM_CAP_ADDR, batteryCapacityAh)) return false;
   if (batteryCapacityAh < CAPACITY_MIN || batteryCapacityAh > CAPACITY_MAX) batteryCapacityAh = batteryCapacityNom;
@@ -434,8 +439,10 @@ bool loadCapFromEEPROM() {
 }
 // Note: loadCapFromEEPROM reads directly into batteryCapacityAh via EEPROM.get
 
-// Nominal capacity (user)
-#define saveNomToEEPROM() saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)
+// Nominal capacity (user). Promoted from macro to function for linker access.
+void saveNomToEEPROM() {
+  saveFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom);
+}
 bool loadNomFromEEPROM() {
   if (!loadFloatEEPROM(EEPROM_NOM_MAGIC_ADDR, EEPROM_NOM_MAGIC_VAL, EEPROM_NOM_ADDR, batteryCapacityNom)) return false;
   if (batteryCapacityNom < CAPACITY_MIN || batteryCapacityNom > CAPACITY_MAX) batteryCapacityNom = BATTERY_CAPACITY_AH;
@@ -588,183 +595,6 @@ float socFromVoltage(float v) {
 // Diagnostics
 // ===========================================
 
-// --- SYSTEM menu (flat) ---
-enum MenuItem {
-  ITEM_CAP,
-#if !BAME_DEV
-  ITEM_VMIN,
-  ITEM_VMAX,
-  ITEM_ECO,
-#endif
-  ITEM_RESET,
-  ITEM_INFO_V,    // read-only: current voltage + min observed
-  SYS_COUNT
-};
-
-void settingsMenu() {
-  uint8_t sel = 0;
-  int8_t editing = -1;
-
-  float tmpCap = batteryCapacityNom;
-#if !BAME_DEV
-  float tmpVmin = vMinUtile;
-  float tmpVmax = vMaxUtile;
-#endif
-  bool tmpConfirm = false;
-#if !BAME_DEV
-  bool tmpSleep = autoDeepSleep;
-#endif
-
-  while (true) {
-    display.clearDisplay();
-    gfx.drawTitle(F("Bame v" BAME_VERSION));
-
-    // Info row (display only): current voltage + min observed
-    {
-      uint8_t y = BLUE_Y + ITEM_INFO_V * 8;
-      display.setTextSize(1);
-      if (sel == ITEM_INFO_V) {
-        display.fillRect(0, y, SCREEN_W, 8, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-      } else {
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-      }
-      display.setCursor(0, y);
-      display.print(voltage, 2);
-      display.print(F("V min:"));
-      if (bufMin > 0) display.print(bufMin, 2);
-      else display.print('-');
-      display.setTextColor(SSD1306_WHITE);
-    }
-
-    char buf[10];
-
-    // Capacity
-    int capVal = (int)(editing == ITEM_CAP ? tmpCap : batteryCapacityNom);
-    itoa(capVal, buf, 10);
-    strcat(buf, "Ah");
-    gfx.drawMenuItem(ITEM_CAP, ' ', F("Capacity"), buf, sel == ITEM_CAP, editing == ITEM_CAP);
-
-#if !BAME_DEV
-    // V min utile (with observed min appended)
-    dtostrf(editing == ITEM_VMIN ? tmpVmin : vMinUtile, 0, 1, buf);
-    {
-      char *p = buf + strlen(buf);
-      *p++ = 'V';
-      if (editing != ITEM_VMIN && bufMin > 0) {
-        *p++ = '/';
-        dtostrf(bufMin, 0, 1, p);
-      } else *p = 0;
-    }
-    gfx.drawMenuItem(ITEM_VMIN, ' ', F("V min"), buf, sel == ITEM_VMIN, editing == ITEM_VMIN);
-
-    // V max utile
-    dtostrf(editing == ITEM_VMAX ? tmpVmax : vMaxUtile, 0, 1, buf);
-    strcat(buf, "V");
-    gfx.drawMenuItem(ITEM_VMAX, ' ', F("V max"), buf, sel == ITEM_VMAX, editing == ITEM_VMAX);
-    // Eco mode
-    gfx.drawMenuItem(ITEM_ECO, ' ', F("Eco mode"),
-      (editing == ITEM_ECO ? tmpSleep : autoDeepSleep) ? "ON" : "OFF",
-      sel == ITEM_ECO, editing == ITEM_ECO);
-#endif
-
-    // Reset ALL
-    gfx.drawMenuItem(ITEM_RESET, ' ', F("Reset ALL"),
-      editing == ITEM_RESET ? (tmpConfirm ? "YES" : "NO") : "",
-      sel == ITEM_RESET, editing == ITEM_RESET);
-
-    display.display();
-
-    Button b = readButtonDebounced();
-    if (b == BTN_NONE) { delay(50); continue; }
-
-    if (editing >= 0) {
-      switch (b) {
-        case BTN_UP:
-          if (editing == ITEM_CAP) { tmpCap += 1; if (tmpCap > CAPACITY_MAX) tmpCap = CAPACITY_MAX; }
-#if !BAME_DEV
-          else if (editing == ITEM_VMIN) { tmpVmin += 0.05; if (tmpVmin > cellCount * LFP_CELL_CHARGE) tmpVmin = cellCount * LFP_CELL_CHARGE; }
-          else if (editing == ITEM_VMAX) { tmpVmax += 0.05; if (tmpVmax > cellCount * LFP_CELL_FULL) tmpVmax = cellCount * LFP_CELL_FULL; }
-          else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
-#endif
-          else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
-          break;
-        case BTN_DOWN:
-          if (editing == ITEM_CAP) { tmpCap -= 1; if (tmpCap < CAPACITY_MIN) tmpCap = CAPACITY_MIN; }
-#if !BAME_DEV
-          else if (editing == ITEM_VMIN) { tmpVmin -= 0.05; if (tmpVmin < cellCount * LFP_CELL_EMPTY) tmpVmin = cellCount * LFP_CELL_EMPTY; }
-          else if (editing == ITEM_VMAX) { tmpVmax -= 0.05; if (tmpVmax < cellCount * LFP_CELL_CHARGE) tmpVmax = cellCount * LFP_CELL_CHARGE; }
-          else if (editing == ITEM_ECO) { tmpSleep = !tmpSleep; }
-#endif
-          else if (editing == ITEM_RESET) { tmpConfirm = !tmpConfirm; }
-          break;
-        case BTN_CENTER:
-          if (editing == ITEM_CAP) {
-            batteryCapacityNom = tmpCap;
-            saveNomToEEPROM();
-            setCapacity(batteryCapacityNom);
-            saveCapToEEPROM();
-          }
-#if !BAME_DEV
-          else if (editing == ITEM_VMIN) {
-            vMinUtile = tmpVmin;
-            // TODO: saveVutileToEEPROM();
-          } else if (editing == ITEM_VMAX) {
-            vMaxUtile = tmpVmax;
-            // TODO: saveVutileToEEPROM();
-          }
-#endif
-#if !BAME_DEV
-          else if (editing == ITEM_ECO) {
-            autoDeepSleep = tmpSleep;
-            saveAutoSleepToEEPROM();
-          }
-#endif
-          else if (editing == ITEM_RESET) {
-            if (tmpConfirm) {
-              for (uint16_t i = 0; i < E2END + 1; i++) EEPROM.write(i, 0xFF);
-              wdt_enable(WDTO_15MS);
-              while (true);
-            }
-          }
-          editing = -1;
-          break;
-        case BTN_LEFT:
-          tmpCap = batteryCapacityNom;
-#if !BAME_DEV
-          tmpVmin = vMinUtile;
-          tmpVmax = vMaxUtile;
-          tmpSleep = autoDeepSleep;
-#endif
-          tmpConfirm = false;
-          editing = -1;
-          break;
-        default: break;
-      }
-    } else {
-      switch (b) {
-        case BTN_UP: sel = (sel == 0) ? SYS_COUNT - 1 : sel - 1; break;
-        case BTN_DOWN: sel = (sel + 1) % SYS_COUNT; break;
-        case BTN_CENTER:
-          if (sel == ITEM_INFO_V) break;  // info item: no action
-          editing = sel;
-          tmpCap = batteryCapacityNom;
-#if !BAME_DEV
-          tmpVmin = vMinUtile;
-          tmpVmax = vMaxUtile;
-          tmpSleep = autoDeepSleep;
-#endif
-          tmpConfirm = false;
-          break;
-        case BTN_LEFT:
-          waitButtonRelease();
-          return;
-        default: break;
-      }
-    }
-    waitButtonRelease();
-  }
-}
 
 // ===========================================
 // Mode normal
@@ -1075,141 +905,6 @@ void updateMeasurements() {
 #endif
 }
 
-void updateDisplay() {
-  display.clearDisplay();
-
-  // No battery detected
-  if (voltage < MIN_BATTERY_V) {
-    gfx.drawGauge(0);
-    display.setTextSize(2);
-    display.setCursor(4, BLUE_Y + 12);
-    if ((millis() / 500) % 2) display.print(F("No Battery"));
-    display.display();
-    return;
-  }
-
-  // === YELLOW ZONE (0-15): SOC gauge with XOR sprites ===
-  gfx.drawGauge(socPercent);
-
-  // === BLUE ZONE (16-63) ===
-
-  // Line 1: Remaining Ah (left) + Voltage (right)
-  int ahInt = (int)(coulombCount / 3600.0);
-  uint8_t ahDigits = (ahInt >= 100) ? 3 : (ahInt >= 10) ? 2 : 1;
-  // Size 2 pass: both big numbers
-  display.setTextSize(2);
-  display.setCursor(0, BLUE_Y + 2);
-  display.print(ahInt);
-  display.setCursor(SCREEN_W - 54, BLUE_Y + 2);
-  display.print(voltage, 1);
-  // Everything after this is size 1 (suffixes, countdown, line 2, line 3).
-  display.setTextSize(1);
-  display.setCursor(ahDigits * 12, BLUE_Y + 2);
-  display.print(F("Ah"));
-  display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
-  display.print(F("V"));
-  // Voltage trend arrow (left of voltage). In dev, also shows 60→0 chrono
-  // countdown while flat (flatSince is maintained by updateMeasurements).
-  {
-    int16_t ax = SCREEN_W - 66;
-    int16_t ay = BLUE_Y + 6;
-    if (voltageTrend > 0)
-      display.fillTriangle(ax, ay + 6, ax + 4, ay, ax + 8, ay + 6, SSD1306_WHITE);
-    else if (voltageTrend < 0)
-      display.fillTriangle(ax, ay, ax + 8, ay, ax + 4, ay + 6, SSD1306_WHITE);
-#if BAME_DEV
-    else if (bufMin > 0) {
-      uint32_t elapsed_ms = millis() - flatSince;
-      if (elapsed_ms < FLAT_COUNTDOWN_MS) {
-        uint8_t remaining = (FLAT_COUNTDOWN_MS / 1000) - (uint8_t)(elapsed_ms / 1000);
-        display.setCursor(remaining < 10 ? ax + 2 : ax - 4, ay);
-        display.print(remaining);
-      }
-    }
-#endif
-  }
-
-  // Line 2: Power (smoothed when buffer full) + instantaneous current
-  // Power uses cAvg × voltage once we have it — averages out cyclic loads.
-  // Current shown as-is (raw A for live feedback).
-  float iForPower = (bufMin > 0) ? cAvg : current;
-  display.setCursor(0, BLUE_Y + 22);
-  display.print((int)abs(iForPower * voltage));
-  display.print(F("W"));
-  // Amps right-aligned
-  {
-    int ci = (int)abs(current);
-    uint8_t alen = 4; // "X.XA" minimum
-    if (ci >= 10) alen++;
-    if (ci >= 100) alen++;
-    if (current < 0) alen++;
-    display.setCursor(SCREEN_W - alen * 6, BLUE_Y + 22);
-    display.print(current, 1);
-    display.print(F("A"));
-  }
-
-  // Line 3: Arrow + time remaining
-  // Use smoothed cAvg when buffer full — cyclic loads average out, autonomy
-  // stops oscillating between "hours" and "infinity" as compressor cycles.
-  int16_t ty = BLUE_Y + 37;
-  float iForAutonomy = (bufMin > 0) ? cAvg : current;
-  float hoursLeft = 0;
-  if (iForAutonomy > ACTIVE_CURRENT) {
-    hoursLeft = (coulombCount / 3600.0) / iForAutonomy;
-  } else if (iForAutonomy < -ACTIVE_CURRENT) {
-    float remaining = (batteryCapacityAs - coulombCount) / 3600.0;
-    if (remaining < 0) remaining = 0;
-    hoursLeft = remaining / (-iForAutonomy);
-  }
-
-  // Bottom left line: either HH:MM (active current) or capacity (at rest)
-  if (abs(current) > ACTIVE_CURRENT) {
-    hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
-    int h = (int)hoursLeft;
-    int m = (int)((hoursLeft - h) * 60);
-    // Triangle: < discharge, > charge
-    if (current > 0) display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
-    else             display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
-    display.setCursor(10, ty);
-    if (h < 10) display.print('0');
-    display.print(h);
-    display.print(':');
-    if (m < 10) display.print('0');
-    display.print(m);
-  } else if (!autoDeepSleep) {
-    // At rest: show estimated capacity
-    display.setCursor(0, ty);
-    display.print((int)batteryCapacityAh);
-    display.print(F("Ah"));
-  }
-
-#if BAME_DEV
-  // Calibration counter (dev only, flash-heavy): blinks waiting for stable rest.
-  if (!autoDeepSleep) {
-    bool needsRest = (calStartVoltage == 0)
-      || ((calTarget > 0) ? (calCoulombs >= calTarget)
-      : ((millis() - calStartMs >= CAL_INITIAL_TIME_MS) && (calCoulombs >= CAL_MIN_COULOMBS)));
-    bool blink = (millis() / DISPLAY_INTERVAL_MS) % 2;
-    if (!needsRest || blink) {
-      display.setCursor(50, ty);
-      float calAh = calCoulombs / 3600.0;
-      if (calAh >= 10.0) display.print((int)calAh);
-      else display.print(calAh, 1);
-      display.print(F("Ah"));
-    }
-  }
-#endif
-
-  // Bottom right: battery icon — charging (partial, blinking) or full (static)
-  if (externalChargeDetected) {
-    if ((millis() / DISPLAY_INTERVAL_MS) % 2)
-      gfx.drawChargingBattery(106, ty, false);  // partial, blinks
-  } else if (voltage >= cellCount * LFP_CELL_CHARGE) {
-    gfx.drawChargingBattery(106, ty, true);     // full, static
-  }
-
-  display.display();
-}
 
 #if BAME_DEBUG
 void debugSerial() {
