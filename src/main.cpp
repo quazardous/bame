@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.13"
+#define BAME_VERSION "1.14"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -161,6 +161,12 @@ bool autoDeepSleep = false;   // auto deep sleep after inactivity timeout
 bool externalChargeDetected = false; // external charge detected (voltage rising unexpectedly)
 int8_t voltageTrend = 0;             // slope sign: -1 down, 0 flat, +1 up
 float bufMin = 0;                    // min voltage over sample buffer (0 until full)
+// Smoothed current from linear regression on coulombCount snapshots.
+// cAvg   : slope → average current over the VHIST_SIZE window (A). 0 until buffer full.
+// maxSliceI : largest consecutive-sample charge-diff / 10s → max |I| over any 10s slice.
+//             Used as the rest gate (catches cyclic loads that a mean would miss).
+float cAvg = 0;
+float maxSliceI = 0;
 #if BAME_DEV
 unsigned long flatSince = 0;         // last time arrow was up/down; drives calibration rest gate + display chrono
 #endif
@@ -817,16 +823,23 @@ void updateMeasurements() {
     calChargeSec = 0;
   }
 
-  // 4) Voltage buffer analysis: linear regression slope + spread.
-  //    Stats computed once the VHIST_SIZE buffer is full (see defines at top).
+  // 4) Buffer analysis: voltage slope + smoothed current.
+  //    Two parallel ring buffers sampled at the same 10s cadence:
+  //    - vhist[]: voltage snapshots → slope → trend (up/down/flat)
+  //    - chist[]: coulombCount snapshots → slope → average current (cAvg)
+  //      AND consecutive-diffs → max current per 10s slice (maxSliceI, gate)
+  //    Using coulombCount (continuously integrated at 100 ms) avoids the
+  //    aliasing of snapshotting raw current on a cyclic load.
   {
     static float vhist[VHIST_SIZE];
+    static float chist[VHIST_SIZE];  // coulombCount snapshots (A·s)
     static uint8_t vhistIdx = 0;
     static uint8_t vhistCount = 0;
     static unsigned long vhistLastMs = 0;
 
     if (vhistLastMs == 0 || now - vhistLastMs >= VHIST_INTERVAL_MS) {
       vhist[vhistIdx] = voltage;
+      chist[vhistIdx] = coulombCount;
       vhistIdx = (vhistIdx + 1) % VHIST_SIZE;
       if (vhistCount < VHIST_SIZE) vhistCount++;
       vhistLastMs = now;
@@ -835,19 +848,35 @@ void updateMeasurements() {
     if (vhistCount == VHIST_SIZE) {
       uint8_t startIdx = vhistIdx; // oldest sample (buffer full)
       float sumY = 0, sumIY = 0;
+      float sumC = 0, sumIC = 0;
       bufMin = vhist[startIdx];
+      float prevC = chist[startIdx];
+      maxSliceI = 0;
       for (uint8_t i = 0; i < VHIST_SIZE; i++) {
         float v = vhist[(startIdx + i) % VHIST_SIZE];
+        float c = chist[(startIdx + i) % VHIST_SIZE];
         sumY  += v;
         sumIY += (float)i * v;
+        sumC  += c;
+        sumIC += (float)i * c;
         if (v < bufMin) bufMin = v;
+        if (i > 0) {
+          // |ΔcoulombCount| / 10s = |average current| over this 10s slice.
+          float sliceI = fabs(c - prevC) / (float)(VHIST_INTERVAL_MS / 1000);
+          if (sliceI > maxSliceI) maxSliceI = sliceI;
+        }
+        prevC = c;
       }
-      // slope in V per 10s step, using compile-time folded Sx/D.
-      float slope = ((float)VHIST_SIZE * sumIY - (float)VHIST_SX * sumY) / (float)VHIST_D;
-      voltageTrend = (slope > VHIST_SLOPE_THRESHOLD) ? 1
-                   : (slope < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
+      // Voltage slope (V / 10s step), compile-time folded Sx/D.
+      float slopeV = ((float)VHIST_SIZE * sumIY - (float)VHIST_SX * sumY) / (float)VHIST_D;
+      voltageTrend = (slopeV > VHIST_SLOPE_THRESHOLD) ? 1
+                   : (slopeV < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
+      // Current slope in (A·s) / step = -avg_current × VHIST_INTERVAL_S.
+      // Minus sign because coulombCount decreases during discharge.
+      float slopeC = ((float)VHIST_SIZE * sumIC - (float)VHIST_SX * sumC) / (float)VHIST_D;
+      cAvg = -slopeC / (float)(VHIST_INTERVAL_MS / 1000);
     }
     // Below 3.375V/cell a charger cannot be active (it imposes higher voltage)
     if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;
@@ -899,10 +928,12 @@ void updateMeasurements() {
 #if BAME_DEV
   //   flatNow    = flat slope detected NOW (chrono started) → optimistic open
   //   stableRest = flat slope confirmed for the full chrono → SOC blend + save
-  // If flatNow reverts before chrono elapses AND no discharge happened, the
-  // optimistic calStartVoltage is discarded.
-  bool flatNow = (abs(current) < VBAT_REST_CURRENT)
-              && (bufMin > 0)
+  // Current gate: `maxSliceI < VBAT_REST_CURRENT` requires the current to have
+  // stayed low across EVERY 10s slice of the 80s buffer — so cyclic loads
+  // (compressor on/off) keep the gate shut even if `current` happens to be
+  // zero at the instant we evaluate. `bufMin > 0` also implies buffer is full.
+  bool flatNow = (bufMin > 0)
+              && (maxSliceI < VBAT_REST_CURRENT)
               && (voltageTrend == 0);
   bool stableRest = flatNow && (now - flatSince >= FLAT_COUNTDOWN_MS);
 
@@ -917,9 +948,9 @@ void updateMeasurements() {
     calStartVoltage = 0;
   }
 #else
-  // Prod: direct gate — current low AND slope flat AND buffer warm.
-  bool stableRest = (abs(current) < VBAT_REST_CURRENT)
-                 && (bufMin > 0)
+  // Prod: direct gate — max current over any 10s slice low AND slope flat.
+  bool stableRest = (bufMin > 0)
+                 && (maxSliceI < VBAT_REST_CURRENT)
                  && (voltageTrend == 0);
 #endif
 
@@ -1065,13 +1096,15 @@ void updateDisplay() {
 #endif
   }
 
-  // Line 2: Power + current
+  // Line 2: Power (smoothed when buffer full) + instantaneous current
+  // Power uses cAvg × voltage once we have it — averages out cyclic loads.
+  // Current shown as-is (raw A for live feedback).
+  float iForPower = (bufMin > 0) ? cAvg : current;
   display.setCursor(0, BLUE_Y + 22);
-  display.print((int)abs(power));
+  display.print((int)abs(iForPower * voltage));
   display.print(F("W"));
   // Amps right-aligned
   {
-    // Count chars for current with 1 decimal + "A"
     int ci = (int)abs(current);
     uint8_t alen = 4; // "X.XA" minimum
     if (ci >= 10) alen++;
@@ -1083,14 +1116,17 @@ void updateDisplay() {
   }
 
   // Line 3: Arrow + time remaining
+  // Use smoothed cAvg when buffer full — cyclic loads average out, autonomy
+  // stops oscillating between "hours" and "infinity" as compressor cycles.
   int16_t ty = BLUE_Y + 37;
+  float iForAutonomy = (bufMin > 0) ? cAvg : current;
   float hoursLeft = 0;
-  if (current > ACTIVE_CURRENT) {
-    hoursLeft = (coulombCount / 3600.0) / current;
-  } else if (current < -ACTIVE_CURRENT) {
+  if (iForAutonomy > ACTIVE_CURRENT) {
+    hoursLeft = (coulombCount / 3600.0) / iForAutonomy;
+  } else if (iForAutonomy < -ACTIVE_CURRENT) {
     float remaining = (batteryCapacityAs - coulombCount) / 3600.0;
     if (remaining < 0) remaining = 0;
-    hoursLeft = remaining / (-current);
+    hoursLeft = remaining / (-iForAutonomy);
   }
 
   // Bottom left line: either HH:MM (active current) or capacity (at rest)

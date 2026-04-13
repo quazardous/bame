@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.14
+
+- Parallel current buffer sampled at the same 10s cadence as voltage. Stores snapshots of `coulombCount` (continuously integrated at 100 ms), so no aliasing on cyclic loads like a fridge compressor.
+- Smoothed current = linear regression slope on the coulomb buffer (same formula as voltage trend). Reuses the existing Sx/D constants — math is symmetric.
+- Watts display and autonomy (HH:MM) now use the smoothed current when the buffer is full, so compressor cycling stops making the readings jitter.
+- Rest gate for calibration: replaced the instantaneous `|current|` check with `maxSliceI < VBAT_REST_CURRENT` — the maximum average current over any 10s slice of the buffer must stay below threshold. Calibration now opens/closes only when voltage flat AND current low for the whole 80s window.
+- Python simulator (sim/trend_sim.py): added current profile, cAvg, maxSliceI, combined stable-zone gate.
+
 ## v1.13
 
 - Tuned trend detection for realistic glaciere cycles: buffer 16→8 samples (80s window), slope threshold 10→5 mV/step. Catches 100 mV voltage swings that previously went undetected.
