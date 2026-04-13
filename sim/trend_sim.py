@@ -73,7 +73,8 @@ def soc_from_voltage(v, v_empty=12.0, v_full=13.6):
 def simulate(profile, duration_s, hist_size, slope_th,
              retro_spread=FLAT_RETRO_SPREAD,
              current_profile=None, rest_threshold=0.3,
-             capacity_ah=80.0, initial_soc=85.0, blend_bias=0.0):
+             capacity_ah=80.0, initial_soc=85.0, blend_bias=0.0,
+             ewma_tau_s=60.0, weight_k=1.0):
     """Simulate the corrected firmware and yield per-sample state.
 
     Models the SOC blend and currentOffset auto-zero, both with the fixes
@@ -96,10 +97,35 @@ def simulate(profile, duration_s, hist_size, slope_th,
     vhist_count = 0
     last_push_s = -1.0
     flat_since = 0.0
+    # EWMA for smoothed current (physical analog: RC low-pass / thermometer)
+    alpha = TICK_S / ewma_tau_s
+    c_ewma = 0.0
+    c_ewma_init = False
+    # Welch (parabolic) window over live + buffer slices: w(i) = 1 − (i/N)²
+    # Decreases with square of distance but goes to 0 at edge (hard cutoff).
+    n_slices = hist_size - 1
+    n_weighted = n_slices + 1
+    welch_weights = [max(0.0, 1.0 - (i / n_weighted) ** 2) for i in range(n_weighted)]
+    welch_total_w = sum(welch_weights)
+    # 1/r² (Lorentzian) variant, unchanged
+    slice_weights = [1.0 / (1.0 + (i / weight_k) ** 2) for i in range(n_weighted)]
+    total_w = sum(slice_weights)
+    slice_currents = []
+    c_wavg = None
+    c_welch = None
+    # Slew-rate limiter: cAvg moves toward live at max rate A/s (boat drift).
+    c_slew = 0.0
+    c_slew_init = False
+    slew_rate = 0.05  # A/s; 0.05 → 100s to swing full 5A range
+    # Critically-damped 2nd order (mass-spring-damper, car suspension):
+    # a = ω²(target − x) − 2ω·v. Smooth step response, no overshoot.
+    c_ms = 0.0
+    v_ms = 0.0
+    c_ms_init = False
+    omega_ms = 1.0 / 60.0  # natural freq; 60s ~ response time
     # Latched (slowly updated) — only refreshed at sample push
     slope = None
     trend = 0
-    c_avg = None
     max_slice_i = None
     retro_k = None
     t = 0.0
@@ -111,6 +137,31 @@ def simulate(profile, duration_s, hist_size, slope_th,
             current_corrected = 0.0
         coulomb_count -= current_corrected * TICK_S
         coulomb_raw   -= current_corrected * TICK_S
+        # EWMA update runs at every tick. Initialize with first valid reading.
+        if not c_ewma_init:
+            c_ewma = current_corrected
+            c_ewma_init = True
+        else:
+            c_ewma = alpha * current_corrected + (1.0 - alpha) * c_ewma
+        # Slew-rate limiter: constant-rate approach to live (boat).
+        if not c_slew_init:
+            c_slew = current_corrected
+            c_slew_init = True
+        else:
+            delta = current_corrected - c_slew
+            max_step = slew_rate * TICK_S
+            if delta > max_step:    c_slew += max_step
+            elif delta < -max_step: c_slew -= max_step
+            else:                   c_slew = current_corrected
+        # Critically-damped 2nd order — amortisseur.
+        # a = ω²(target − x) − 2ω·v. Mass = 1, critical damping.
+        if not c_ms_init:
+            c_ms = current_corrected
+            c_ms_init = True
+        else:
+            a = omega_ms * omega_ms * (current_corrected - c_ms) - 2.0 * omega_ms * v_ms
+            v_ms += a * TICK_S
+            c_ms += v_ms * TICK_S
         if capacity_as > 0:
             soc_percent = max(0.0, min(100.0, coulomb_count / capacity_as * 100.0))
 
@@ -125,24 +176,32 @@ def simulate(profile, duration_s, hist_size, slope_th,
                 vhist_count += 1
             last_push_s = t
 
-            # Analyze buffer on each new sample
+            # Analyze buffer on each new sample (slope, trend, maxSlice + cached slice currents)
             if vhist_count == hist_size:
-                oldest_idx = vhist_idx  # newly-rotated = oldest
+                oldest_idx = vhist_idx
                 vbuf_ordered = [vhist[(oldest_idx + i) % hist_size] for i in range(hist_size)]
                 cbuf_ordered = [chist[(oldest_idx + i) % hist_size] for i in range(hist_size)]
                 slope = slope_of(vbuf_ordered, Sx, D)
                 trend = 1 if slope > slope_th else -1 if slope < -slope_th else 0
                 max_slice_i = 0.0
+                slice_currents = []   # stored for per-tick weighted avg
                 for i in range(1, hist_size):
-                    slice_i = abs(cbuf_ordered[i] - cbuf_ordered[i - 1]) / VHIST_INTERVAL_S
-                    if slice_i > max_slice_i:
-                        max_slice_i = slice_i
+                    slice_i_signed = -(cbuf_ordered[i] - cbuf_ordered[i - 1]) / VHIST_INTERVAL_S
+                    slice_currents.append(slice_i_signed)  # oldest first
+                    abs_i = abs(slice_i_signed)
+                    if abs_i > max_slice_i:
+                        max_slice_i = abs_i
 
-        # 2-point cAvg: refreshed at every tick (LIVE vs oldest snapshot)
-        if vhist_count == hist_size:
-            oldest_idx = vhist_idx
-            age_s = (t - last_push_s) + (hist_size - 1) * VHIST_INTERVAL_S
-            c_avg = -(coulomb_raw - chist[oldest_idx]) / age_s
+        # Weighted avg (1/r² Lorentzian) + Welch (parabolic), both include live
+        if vhist_count == hist_size and slice_currents:
+            wsum = slice_weights[0] * current_corrected
+            welch_sum = welch_weights[0] * current_corrected
+            for age_idx in range(1, n_weighted):
+                s = slice_currents[-age_idx]  # age_idx 1 → newest buffer slice
+                wsum += slice_weights[age_idx] * s
+                welch_sum += welch_weights[age_idx] * s
+            c_wavg = wsum / total_w
+            c_welch = welch_sum / welch_total_w
 
         # Retro-range chrono
         if trend != 0 or vhist_count < hist_size:
@@ -190,8 +249,8 @@ def simulate(profile, duration_s, hist_size, slope_th,
 
         # Output sparsely
         if t - last_output_s >= OUTPUT_EVERY_S - 1e-6:
-            yield (t, v_now, slope, trend, cd, stable, retro_k, c_avg, max_slice_i,
-                   ina, current_corrected)
+            yield (t, v_now, slope, trend, cd, stable, retro_k, c_wavg, max_slice_i,
+                   ina, current_corrected, c_ewma, c_slew, c_ms)
             last_output_s = t
 
         t += TICK_S
@@ -267,6 +326,10 @@ def main():
                     help='cyclic glaciere ON duration after initial load (s)')
     ap.add_argument('--cycle-idle-s', type=int, default=0,
                     help='cyclic glaciere OFF duration between pulls (s)')
+    ap.add_argument('--ewma-tau', type=float, default=60.0,
+                    help='EWMA time constant in seconds (default 60)')
+    ap.add_argument('--weight-k', type=float, default=1.0,
+                    help='1/r² weight parameter (slice i weight = 1/(1+(i/k)^2))')
     args = ap.parse_args()
 
     prof = glaciere_profile(args.idle_s, args.drop_s, args.load_s,
@@ -283,24 +346,26 @@ def main():
           f"{args.iload}A, load {args.load_s}s, "
           f"recovery tau={args.recov_tau}s back to {args.vbase}V")
     print()
-    print(f"{'t(s)':>6} {'V':>7} {'slope':>11} {'arw':>4} {'cd':>4} "
-          f"{'retroK':>7} {'cAvg':>6} {'W':>5} {'maxSlc':>6} "
-          f"{'ina':>5} {'shown':>6} {'stable':>7}")
-    print("-" * 95)
+    print(f"# EWMA tau={args.ewma_tau:.0f}s  |  1/r² k={args.weight_k}  |  Welch + adaptive EWMA also reported")
+    print(f"{'t(s)':>6} {'V':>7} {'arw':>4} {'ewma':>6} {'welch':>6} {'1/r²':>6} "
+          f"{'adapt':>6} {'ina':>5} {'stable':>7}")
+    print("-" * 70)
     prev_trend = 0
     prev_stable = False
-    for (t, v, slope, trend, cd, stable, retro_k, c_avg, max_slc,
-         ina, shown) in simulate(
+    for (t, v, slope, trend, cd, stable, retro_k, c_wavg, max_slc,
+         ina, shown, c_ewma, c_slew, c_ms) in simulate(
             prof, args.duration, args.hist, args.threshold,
             current_profile=iprof, rest_threshold=args.rest_i,
-            initial_soc=args.initial_soc, blend_bias=args.blend_bias):
+            initial_soc=args.initial_soc, blend_bias=args.blend_bias,
+            ewma_tau_s=args.ewma_tau, weight_k=args.weight_k):
         slope_s = f"{slope*1000:+6.2f}mV" if slope is not None else "   --"
         arrow = {1: 'UP', -1: 'DOWN', 0: ''}[trend]
         cd_s = f"{cd:2d}" if cd is not None else ""
         retro_s = f"{retro_k}" if retro_k is not None else ""
-        c_s = f"{c_avg:+.2f}" if c_avg is not None else ""
-        w_s = f"{abs(c_avg * v):.0f}" if c_avg is not None else ""
-        ms_s = f"{max_slc:.2f}" if max_slc is not None else ""
+        ewma_s = f"{c_ewma:+.2f}"
+        welch_s = f"{c_welch:+.2f}" if c_welch is not None else ""
+        wavg_s = f"{c_wavg:+.2f}" if c_wavg is not None else ""
+        adapt_s = f"{c_adapt:+.2f}"
         ina_s = f"{ina:+.2f}"
         shown_s = f"{shown:+.2f}"
         stable_s = 'STABLE' if stable else ''
@@ -310,9 +375,8 @@ def main():
         if stable != prev_stable:
             events.append('ENTER STABLE' if stable else 'EXIT STABLE')
         marker = (' <<< ' + ', '.join(events)) if events else ''
-        print(f"{int(t):6d} {v:7.3f} {slope_s:>11} {arrow:>4} {cd_s:>4} "
-              f"{retro_s:>7} {c_s:>6} {w_s:>5} {ms_s:>6} "
-              f"{ina_s:>5} {shown_s:>6} {stable_s:>7}{marker}")
+        print(f"{int(t):6d} {v:7.3f} {arrow:>4} {ewma_s:>6} {welch_s:>6} {wavg_s:>6} "
+              f"{adapt_s:>6} {ina_s:>5} {stable_s:>7}{marker}")
         prev_trend = trend
         prev_stable = stable
 

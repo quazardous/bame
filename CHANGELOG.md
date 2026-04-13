@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.17
+
+- Smoothed current display switched from a 2-point sliding 80s window to an EWMA (RC low-pass / capacitor analog). Refreshes every tick instead of stepping every 10s, no edge discontinuity. Initial τ=120s, lowered to τ=30s after on-device testing — recovery feels right without too much jitter on glaciere cycles.
+- Simulator: added EWMA, slew-rate limiter, Welch (parabolic) and 1/r² Lorentzian weighted averages, plus a critically-damped 2nd-order (mass-spring-damper) variant. All compared against EWMA on a cyclic-glaciere profile. Confirmed plain EWMA is the best trade-off for cyclic loads; weighted-with-live schemes amplified the live current too much.
+- BAME → BaMe everywhere user-facing (Battery Meter, not Monitor). README intro rewritten in casual tinkerer tone — assumes the reader is in this for fun, not efficiency.
+
 ## v1.16
 
 - Fixed current display frozen near 0 A during glaciere pulls. Root cause: once `coulombRaw` was introduced (v1.15), `stableRest` no longer flickered off during load, so in the 10 s lag between a fresh load and the next buffer push, the currentOffset auto-zero had time to converge toward the ongoing load current — `readCurrent = ina - currentOffset` then collapsed to near 0. Display was stuck at ±0.2 A instead of 3-4 A.

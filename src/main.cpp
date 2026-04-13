@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Configuration ---
-#define BAME_VERSION "1.16"
+#define BAME_VERSION "1.17"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0
@@ -90,6 +90,17 @@
 #define VHIST_SX  ((VHIST_SIZE) * ((VHIST_SIZE) - 1) / 2)
 #define VHIST_SXX ((VHIST_SIZE) * ((VHIST_SIZE) - 1) * (2 * (VHIST_SIZE) - 1) / 6)
 #define VHIST_D   ((long)(VHIST_SIZE) * (VHIST_SXX) - (long)(VHIST_SX) * (VHIST_SX))
+
+// --- Smoothed current display (EWMA / first-order low-pass, a.k.a. RC filter) ---
+// cAvg_new = alpha × current + (1 − alpha) × cAvg_old, run every tick.
+// Physical analogue: capacitor charging through a resistor — reacts to
+// changes with inertia. τ ≈ tick_interval / alpha. Tune τ vs responsiveness:
+//   τ = 30 s  : snappy, jitters visibly on glaciere cycles (spread ~3.5 A)
+//   τ = 60 s  : compromise
+//   τ = 120 s : very smooth but long memory of past loads
+// TODO: optional dead-band on top — ignore changes < ~50 mA so the watt
+// reading stops trembling at rest from INA226 residual noise.
+#define CAVG_EWMA_ALPHA  (MEASURE_INTERVAL_MS / 1000.0f / 30.0f)
 
 // EEPROM layout for voltage calibration (after keypad: addr 11+)
 #define EEPROM_VCAL_MAGIC_ADDR 12
@@ -780,6 +791,13 @@ void updateMeasurements() {
   current = readCurrent();
   power = readPower();
 
+  // EWMA of current at every tick (physical: thermometer with τ=120s memory).
+  // Initialized on the first valid reading so the display doesn't ramp from
+  // zero over several minutes after boot.
+  static bool cAvgInit = false;
+  if (!cAvgInit) { cAvg = current; cAvgInit = true; }
+  else           { cAvg = CAVG_EWMA_ALPHA * current + (1.0f - CAVG_EWMA_ALPHA) * cAvg; }
+
   unsigned long now = millis();
   float dtSeconds = (now - lastMeasure) / 1000.0;
   lastMeasure = now;
@@ -883,14 +901,6 @@ void updateMeasurements() {
                    : (slopeV < -VHIST_SLOPE_THRESHOLD) ? -1 : 0;
       if (voltageTrend > 0) externalChargeDetected = true;
       else if (voltageTrend < 0) externalChargeDetected = false;
-      // Smoothed current: sliding 2-point window against the LIVE coulombRaw.
-      // cAvg refreshes every tick (100 ms), not only on sample push (10 s).
-      // Using coulombRaw (not coulombCount) insulates cAvg from the SOC blend
-      // that corrects coulombCount while stableRest is active.
-      // Age of oldest sample = time since last push + (VHIST_SIZE-1) × interval.
-      unsigned long ageMs = now - vhistLastMs
-                          + (unsigned long)(VHIST_SIZE - 1) * VHIST_INTERVAL_MS;
-      cAvg = -(coulombRaw - chist[startIdx]) * 1000.0f / (float)ageMs;
     }
     // Below 3.375V/cell a charger cannot be active (it imposes higher voltage)
     if (voltage < cellCount * LFP_CELL_CHARGE_MIN) externalChargeDetected = false;
