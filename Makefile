@@ -7,26 +7,35 @@
 ENV ?= nano-bus-4s
 -include Makefile.local
 
-.DEFAULT_GOAL := build
+.DEFAULT_GOAL := help
+
+ifeq ($(OS),Windows_NT)
+HELP_CMD = powershell -NoProfile -Command "Write-Host 'Usage: make <target>'; Write-Host ''; Write-Host 'Targets:'; Select-String -Path Makefile -Pattern '^[a-zA-Z_-]+:.*##' | ForEach-Object { $$p = $$_.Line -split ':[^#]*##\s*', 2; '  {0,-15} {1}' -f $$p[0], $$p[1] }"
+else
+HELP_CMD = echo "Usage: make <target>"; echo ""; echo "Targets:"; grep -E '^[a-zA-Z_-]+:.*##' Makefile | sed 's/:[^#]*##[ 	]*/	/'
+endif
+
+help:  ## Show this help
+	@$(HELP_CMD)
 
 # --- Firmware ---
 
-build:
+build:  ## Build firmware for $(ENV)
 	pio run -e $(ENV)
 
-upload:
+upload:  ## Flash firmware to device
 	pio run -e $(ENV) -t upload
 
-monitor:
+monitor:  ## Open serial monitor
 	pio device monitor
 
-clean:
+clean:  ## Clean PlatformIO build artifacts
 	pio run -t clean
 
-size:
+size:  ## Show Flash/RAM usage for $(ENV)
 	@pio run -e $(ENV) 2>&1 | grep -E "Flash|RAM" | head -2
 
-list-envs:
+list-envs:  ## List PlatformIO environments
 	@grep -E "^\[env:" platformio.ini | sed 's/\[env://; s/\]//'
 
 # --- Shared C core library (for sim/ via Python ctypes) ---
@@ -51,7 +60,7 @@ CORE_LIB := sim/$(LIBPREFIX)bame_core.$(LIBEXT)
 
 CC ?= gcc
 
-core-lib: $(CORE_LIB)
+core-lib: $(CORE_LIB)  ## Build shared C core lib for sim/
 
 $(CORE_LIB): src/bame_core.c src/bame_core.h
 	@command -v $(CC) >/dev/null 2>&1 || { \
@@ -61,15 +70,15 @@ $(CORE_LIB): src/bame_core.c src/bame_core.h
 	$(CC) -shared -fPIC -O2 -Wall -Wextra src/bame_core.c -o $(CORE_LIB)
 	@echo "built $(CORE_LIB)"
 
-core-test: $(CORE_LIB)
+core-test: $(CORE_LIB)  ## Run Python smoke test against core lib
 	python sim/bame_core.py
 
 # --- Sim & tools ---
 
-sim-cal:
+sim-cal:  ## Run calibration sim (3 cycles, 50/80 Ah)
 	python sim/calibration_sim.py --true-capacity 50 --nominal-capacity 80 --cycles 3
 
-screenshots:
+screenshots:  ## Render UI screen mockups
 	python sim/render_screens.py
 
-.PHONY: build upload monitor clean size list-envs core-lib core-test sim-cal screenshots
+.PHONY: help build upload monitor clean size list-envs core-lib core-test sim-cal screenshots

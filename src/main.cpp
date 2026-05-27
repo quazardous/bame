@@ -227,10 +227,13 @@ void setCapacityNom(float ah) {
 }
 
 void declareBatteryFull(unsigned long now) {
-  bame_declare_full(&bame, (uint32_t)now);
-  // Mirror state for display/menu
-  coulombCount = bame.coulomb_count;
-  socUncertain = bame.soc_uncertain;
+  bame_declare_full(&bame, &bame_cfg, (uint32_t)now);
+  // Mirror state for display/menu (capacity may have been raised by the
+  // amplitude-max learning step inside bame_declare_full).
+  coulombCount      = bame.coulomb_count;
+  socUncertain      = bame.soc_uncertain;
+  batteryCapacityAh = bame.capacity_ah;
+  capacityLearned   = bame.capacity_learned;
   saveCoulombEEPROM();
   saveLearnedEEPROM();
 }
@@ -260,13 +263,11 @@ static void updateMeasurements() {
   capacityLearned = bame.capacity_learned;
   batteryCapacityAh = bame.capacity_ah;
 
-  // Persist when events fire (capacity changed, cycle closed, or full reset).
+  // Persist on FULL — that's when capacity may have been raised by the
+  // amplitude-max learning step, and when coulomb_count was reset to top.
   if (evt == BAME_EVT_FULL) {
     saveCoulombEEPROM();
     saveLearnedEEPROM();
-  } else if (evt == BAME_EVT_BMS_CUTOFF) {
-    saveLearnedEEPROM();
-    saveCoulombEEPROM();
   }
 
   // Periodic save so a power loss doesn't wipe the integrator.

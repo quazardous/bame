@@ -7,7 +7,7 @@ Build the shared library first:
     make core-lib
 
 Then use it:
-    from bame_core import BameCore, EVT_FULL, EVT_BMS_CUTOFF
+    from bame_core import BameCore, EVT_FULL
     core = BameCore(cells=4, wiring_bus=False, capacity_ah=80)
     evt = core.step(voltage=13.2, current_raw=3.7, dt_s=0.1, now_ms=100)
 """
@@ -39,7 +39,6 @@ def _lib_path():
 class BameConfig(Structure):
     _fields_ = [
         ("v_full_per_cell",       c_float),
-        ("v_min_battery",         c_float),
         ("i_rest",                c_float),
         ("full_rest_ms",          c_uint32),
         ("cavg_ewma_alpha",       c_float),
@@ -53,33 +52,33 @@ class BameConfig(Structure):
 
 class BameState(Structure):
     _fields_ = [
-        ("cells",                 c_uint8),
-        ("wiring_bus",            c_bool),
-        ("capacity_ah",           c_float),
-        ("capacity_learned",      c_bool),
-        ("coulomb_count",         c_float),
-        ("soc_uncertain",         c_bool),
-        ("battery_present",       c_bool),
-        ("coulombs_at_last_full", c_float),
-        ("since_last_full_ms",    c_uint32),
-        ("rest_at_top_since_ms",  c_uint32),
-        ("v_slow_avg",            c_float),
-        ("current_offset",        c_float),
-        ("c_avg",                 c_float),
-        ("c_avg_init",            c_bool),
-        ("voltage",               c_float),
-        ("current",               c_float),
-        ("charging_external",     c_bool),
-        ("ext_charge_armed",      c_bool),
-        ("below_top_since_ms",    c_uint32),
+        ("cells",                    c_uint8),
+        ("wiring_bus",               c_bool),
+        ("capacity_ah",              c_float),
+        ("capacity_learned",         c_bool),
+        ("coulomb_count",            c_float),
+        ("soc_uncertain",            c_bool),
+        ("battery_present",          c_bool),
+        ("coulombs_at_last_full",    c_float),
+        ("max_delivered_c_in_cycle", c_float),
+        ("since_last_full_ms",       c_uint32),
+        ("rest_at_top_since_ms",     c_uint32),
+        ("v_slow_avg",               c_float),
+        ("current_offset",           c_float),
+        ("c_avg",                    c_float),
+        ("c_avg_init",               c_bool),
+        ("voltage",                  c_float),
+        ("current",                  c_float),
+        ("charging_external",        c_bool),
+        ("ext_charge_armed",         c_bool),
+        ("below_top_since_ms",       c_uint32),
     ]
 
 
 # --- Event enum (matches bame_event_t) ---
-EVT_NONE       = 0
-EVT_FULL       = 1
-EVT_BMS_CUTOFF = 2
-EVT_PARTIAL    = 3
+EVT_NONE    = 0
+EVT_FULL    = 1
+EVT_PARTIAL = 3
 
 
 # --- Library loader ---
@@ -103,7 +102,8 @@ def _load():
                                c_float, c_float, c_float, c_uint32]
 
     _lib.bame_declare_full.restype = None
-    _lib.bame_declare_full.argtypes = [POINTER(BameState), c_uint32]
+    _lib.bame_declare_full.argtypes = [POINTER(BameState), POINTER(BameConfig),
+                                       c_uint32]
 
     _lib.bame_soc_percent.restype = c_float
     _lib.bame_soc_percent.argtypes = [POINTER(BameState)]
@@ -128,7 +128,8 @@ class BameCore:
                               voltage, current_raw, dt_s, now_ms)
 
     def declare_full(self, now_ms):
-        _lib.bame_declare_full(ctypes.byref(self.state), now_ms)
+        _lib.bame_declare_full(ctypes.byref(self.state),
+                               ctypes.byref(self.config), now_ms)
 
     @property
     def soc_percent(self):
@@ -161,4 +162,4 @@ if __name__ == "__main__":
         if evt != EVT_NONE:
             print(f"  t={t_ms}ms: event={evt}")
     print(f"after 1s @ 3A: coulomb_count={c.coulomb_count:.1f}, cAvg={c.c_avg:.3f} A")
-    print(f"  (expected: ~{80*3600 - 3.0*1.0:.0f} As if battery_present transition worked)")
+    print(f"  (expected: ~{80*3600 - 3.0*1.0:.0f} As if first-tick init fired)")

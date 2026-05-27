@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Capacity-calibration end-to-end simulation — v2 (pure coulomb counting).
+Capacity-calibration end-to-end simulation — v2 (amplitude-max learning).
 
 Drives the REAL C core (src/bame_core.c, loaded via ctypes) against a
-`_battery.Battery` with known true capacity and a load profile from
-`_scenarios`. Prints events (full detected, BMS cutoff cycle closed) and
-a final summary of how close the learned capacity got to the truth.
+`_battery.Battery` with known true capacity. Prints events (full detected)
+and a final summary of how close the learned capacity got to the truth.
+
+The v2 algorithm raises capacity on each FULL event when the cycle's peak
+depth-of-discharge exceeded the current capacity (monotonic raise-only).
+No BMS-cutoff observation — BAME runs on the battery it measures, so a
+real cutoff is a power-loss event the algorithm can never see.
 
 Test "battery configured wrong" cases:
   --true-capacity 50 --nominal-capacity 80   # sticker lies
@@ -24,17 +28,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _battery import Battery
-from bame_core import BameCore, EVT_FULL, EVT_BMS_CUTOFF, EVT_PARTIAL
+from bame_core import BameCore, EVT_FULL, EVT_PARTIAL
 
 
 TICK_S = 0.1
-EVENT_NAMES = {0: 'none', 1: 'FULL', 2: 'BMS_CUTOFF', 3: 'PARTIAL'}
+EVENT_NAMES = {0: 'none', 1: 'FULL', 3: 'PARTIAL'}
 
 
-def run_one_cycle(core, battery, discharge_a, charge_a, rest_s, bms_cutoff_v,
+def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
                    now_ms_ref, verbose=False):
-    """Discharge battery until BMS cutoff, rest, recharge. Drives the C core
-    with the simulated voltage/current at TICK_S granularity."""
+    """Discharge battery until near-empty, rest, recharge to FULL. Drives the
+    C core with the simulated voltage/current at TICK_S granularity. No
+    BMS-cutoff sim — that event can never be observed in prod (#499)."""
     events = []
     t_local = 0.0
     now_ms = now_ms_ref
@@ -53,17 +58,11 @@ def run_one_cycle(core, battery, discharge_a, charge_a, rest_s, bms_cutoff_v,
         t_local += TICK_S
         now_ms += int(TICK_S * 1000)
 
-    # Force BMS cutoff by dropping voltage briefly — matches real BMS behavior
-    for _ in range(10):  # 1 second at cutoff voltage
-        evt = core.step(bms_cutoff_v, 0.0, TICK_S, now_ms)
-        if evt == EVT_BMS_CUTOFF:
-            events.append((t_local, evt))
-            if verbose:
-                print(f"   t={t_local:7.0f}s  BMS_CUTOFF  "
-                      f"delivered={battery.true_capacity_as/3600 - battery.coulombs_remaining/3600:.2f}Ah "
-                      f"core.learned={core.capacity_ah:.2f}Ah")
-        t_local += TICK_S
-        now_ms += int(TICK_S * 1000)
+    if verbose:
+        delivered_ah = (battery.true_capacity_as - battery.coulombs_remaining) / 3600.0
+        print(f"   t={t_local:7.0f}s  discharge end  "
+              f"true_delivered={delivered_ah:.2f}Ah  "
+              f"core.max_delivered={core.state.max_delivered_c_in_cycle/3600:.2f}Ah")
 
     # Rest
     for _ in range(int(rest_s / TICK_S)):
@@ -141,7 +140,6 @@ def main():
           f"({core.soc_percent:.0f}%)")
     print()
 
-    bms_cutoff_v = 0.3  # voltage during BMS cutoff event
     now_ms = 0
     cycle_results = []
 
@@ -151,7 +149,7 @@ def main():
             print(f"--- Cycle {cycle} ---")
         events, now_ms = run_one_cycle(core, battery,
                                         args.discharge_a, args.charge_a,
-                                        args.rest_s, bms_cutoff_v, now_ms,
+                                        args.rest_s, now_ms,
                                         verbose=args.verbose)
         cycle_results.append((cycle, core.capacity_ah, core.capacity_learned))
         print(f"cycle {cycle}: real={args.true_capacity}Ah  "

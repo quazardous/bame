@@ -18,21 +18,19 @@ extern "C" {
 
 
 typedef enum {
-    BAME_EVT_NONE       = 0,
-    BAME_EVT_FULL       = 1,   // battery full event (SOC → 100%)
-    BAME_EVT_BMS_CUTOFF = 2,   // voltage collapsed, cycle closed
-    BAME_EVT_PARTIAL    = 3,   // LOAD-mode unexplained V rise (soc_uncertain set)
+    BAME_EVT_NONE    = 0,
+    BAME_EVT_FULL    = 1,   // battery full event (SOC → 100%)
+    BAME_EVT_PARTIAL = 3,   // LOAD-mode unexplained V rise (soc_uncertain set)
 } bame_event_t;
 
 
 // Tunable thresholds. Filled by `bame_config_defaults()` to match firmware.
 typedef struct {
     float    v_full_per_cell;   // 3.40  — rest voltage above this = at-top
-    float    v_min_battery;     // 1.0   — below this = BMS cutoff
     float    i_rest;            // 0.3   — |I| below this = battery at rest
     uint32_t full_rest_ms;       // 30000 — sustained top+rest needed for full evt
     float    cavg_ewma_alpha;    // 0.1/30 — smoothed current constant
-    float    cap_min_ah;         // 1.0   — sanity bounds
+    float    cap_min_ah;         // 1.0   — sanity bounds for learned capacity
     float    cap_max_ah;         // 500.0
     float    v_rise_partial;     // 0.05  — LOAD mode: V rise > this = partial charge
     float    v_disconnect_drop;  // 0.5   — LOAD mode: V drop > this (fast) = charger unplug
@@ -49,17 +47,21 @@ typedef struct {
 
     // --- Capacity ---
     float capacity_ah;
-    bool  capacity_learned;      // true once ≥1 full→cutoff cycle was measured
+    bool  capacity_learned;      // true once a cycle's amplitude exceeded nominal
 
     // --- SOC integrator (single source of truth) ---
     float coulomb_count;          // A·s
     bool  soc_uncertain;
 
-    // --- Battery presence ---
+    // --- Battery presence (set true on first valid tick; never goes false in
+    // prod — if the BMS cuts off, BAME loses power and reboots) ---
     bool  battery_present;
 
     // --- Cycle bookkeeping ---
     float   coulombs_at_last_full;
+    float   max_delivered_c_in_cycle;  // peak (coulombs_at_last_full - coulomb_count)
+                                       // seen since last FULL; promoted to capacity
+                                       // on the next FULL if it exceeds nominal
     uint32_t since_last_full_ms;
 
     // --- Event-detection internals ---
@@ -100,7 +102,9 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
                        float dt_s, uint32_t now_ms);
 
 // Declare the battery full (manual menu action or external event).
-void bame_declare_full(bame_state_t* s, uint32_t now_ms);
+// Takes cfg so the amplitude-max learning step can clamp to cap_min/cap_max.
+void bame_declare_full(bame_state_t* s, const bame_config_t* cfg,
+                       uint32_t now_ms);
 
 // Derived helpers (pure reads, no mutation).
 float bame_capacity_as(const bame_state_t* s);
