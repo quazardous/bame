@@ -96,8 +96,8 @@ Available variants (run `make list-envs`):
 Long-press CENTER to open the settings menu. Items:
 
 - **Capacity (Ah)** — sticker value of your battery. Used as the starting
-  reference until a discharge cycle to BMS cutoff measures the real
-  capacity and replaces it (the `*` next to the capacity display goes away
+  reference; when a discharge cycle delivers more Ah than this, the learned
+  capacity rises to match (the `*` next to the capacity display goes away
   at that point).
 - **Battery full** — manual "SOC = 100%" declaration. Use after a charge
   that didn't trigger the auto-detect (= the charging icon didn't appear),
@@ -125,7 +125,7 @@ build_flags = ${hw_nano.board_flags} -DBAME_WIRING_BUS=1 -DBAME_CELLS=7
 
 `sim/calibration_sim.py` drives the real C core (loaded as a shared
 library via ctypes) against a synthetic LFP battery, so you can check how
-the firmware will behave on a full → cutoff → recharge cycle without
+the firmware will behave on a full → deep-discharge → recharge cycle without
 waiting hours for your real pack to go through it.
 
 ```bash

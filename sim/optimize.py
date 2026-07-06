@@ -1,41 +1,63 @@
 #!/usr/bin/env python3
 """
-Genetic optimizer for BaMe calibration parameters.
+Genetic optimizer for the BaMe v2 core thresholds (bame_config_t).
 
-Evolves the best parameter set by running the calibration simulation
-across multiple scenarios and minimizing capacity estimation error.
+Evolves the detection/learning thresholds by running full → deep-discharge
+→ recharge cycles of the REAL C core (src/bame_core.c via ctypes) against
+the synthetic LFP battery, minimizing capacity-learning error and final
+SOC drift. Because it drives the exact code that runs on the AVR, a
+winning genome maps 1:1 onto `bame_config_defaults()`.
+
+Uses small fast packs (2 Ah at 8 A) so a genome evaluates in ~1-2 s at the
+firmware tick rate (100 ms). Expect ~5-10 min with the defaults.
 
 Usage:
-    python optimize.py [--generations 50] [--population 40]
+    make core-lib     # compile sim/bame_core.dll once
+    python sim/optimize.py [--generations 15] [--population 20]
 """
 
 import argparse
-import random
 import copy
-from calibration_sim import Battery, CalibrationState, SCENARIOS
+import os
+import random
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _battery import Battery
+from bame_core import BameCore, EVT_FULL
+from calibration_sim import run_one_cycle
 
 # ============================================================
-# Parameters to optimize (name, min, max, firmware default)
+# Parameters to optimize: (name, min, max, firmware default)
+# Times are in seconds here; converted to ms when written into the config.
+# cavg_ewma_alpha (display smoothing) and cap_min/max (sanity bounds) are
+# deliberately not evolved — they don't affect learning or SOC.
 # ============================================================
 PARAM_DEFS = [
-    ('cal_initial_time_s',  10,    300,    60),
-    ('cal_min_coulombs',    50,    2000,   500),
-    ('rest_stable_s',       2,     30,     5),
-    ('rest_current',        0.05,  1.0,    0.3),
-    ('soc_blend_factor',    0.01,  0.20,   0.05),
-    ('converge_fast',       0.005, 0.05,   0.01),
-    ('converge_slow',       0.0005,0.005,  0.001),
-    ('charge_current',      0.3,   5.0,    1.0),
-    ('charge_invalidate_s', 1,     30,     5),
+    ('v_full_per_cell',   3.30, 3.55, 3.40),
+    ('i_rest',            0.05, 1.00, 0.30),
+    ('full_rest_s',       5.0,  60.0, 30.0),
+    ('v_rise_partial',    0.01, 0.30, 0.05),
+    ('v_disconnect_drop', 0.10, 1.00, 0.50),
+    ('ext_rearm_s',       2.0,  60.0, 15.0),
 ]
 
-# Test conditions: (true_capacity, nominal, cells, scenarios)
+# Test conditions: (true_ah, nominal_ah, wiring_bus, cycles).
+# nominal < true exercises the amplitude-max raise (needs a few cycles to
+# climb past the ±10% integrator clamp); nominal == true checks that a
+# correct estimate stays put and SOC tracks.
 TEST_CASES = [
-    (50,  80, 4, ['mixed', 'long', 'multicycle']),
-    (80,  80, 4, ['mixed', 'long', 'multicycle']),
-    (20,  80, 4, ['mixed', 'long']),
-    (100, 80, 4, ['long', 'multicycle']),
+    (2.0, 1.7, True,  3),
+    (2.0, 2.0, True,  1),
+    (2.0, 1.7, False, 3),
+    (2.0, 2.0, False, 1),
 ]
+
+CELLS       = 4
+DISCHARGE_A = 8.0
+CHARGE_A    = 8.0
+REST_S      = 90.0   # must exceed the largest evolvable full_rest_s
 
 
 def make_genome(params=None):
@@ -59,170 +81,75 @@ def clamp_genome(genome):
     return genome
 
 
-def apply_params(cal, genome):
-    """Apply genome parameters to a CalibrationState."""
-    cal.CAL_INITIAL_TIME_S = genome['cal_initial_time_s']
-    cal.CAL_MIN_COULOMBS = genome['cal_min_coulombs']
-    cal.REST_STABLE_S = genome['rest_stable_s']
-    cal.REST_CURRENT = genome['rest_current']
-    cal.CONVERGE_FAST = genome['converge_fast']
-    cal.CONVERGE_SLOW = genome['converge_slow']
-    # These need custom handling in CalibrationState
-    cal._soc_blend = genome['soc_blend_factor']
-    cal.CHARGE_CURRENT = genome['charge_current']
-    cal._charge_inv_s = genome['charge_invalidate_s']
+def apply_genome(core, genome):
+    """Write genome values into the core's bame_config_t."""
+    cfg = core.config
+    cfg.v_full_per_cell   = genome['v_full_per_cell']
+    cfg.i_rest            = genome['i_rest']
+    cfg.full_rest_ms      = int(genome['full_rest_s'] * 1000)
+    cfg.v_rise_partial    = genome['v_rise_partial']
+    cfg.v_disconnect_drop = genome['v_disconnect_drop']
+    cfg.ext_rearm_ms      = int(genome['ext_rearm_s'] * 1000)
 
 
-# Patch CalibrationState to use genome parameters
-_orig_update = CalibrationState.update
+def evaluate(genome, seed, verbose=False):
+    """Run all test cases, return fitness (lower = better).
 
-def _patched_update(self, voltage, current_raw, dt, time_s):
-    """Patched update that uses genome parameters."""
-    current = current_raw - self.current_offset
-    if abs(current) < 0.05:
-        current = 0
+    Endpoint metrics (learned capacity, final SOC) barely discriminate on
+    clean deep cycles — almost any sane threshold set nails them. The
+    mid-run SOC error is where thresholds bite (e.g. a FULL declared too
+    early during a LOAD-mode charge snaps SOC to 100% while the pack is
+    still filling), so it is sampled throughout and weighted in.
+    """
+    random.seed(seed)   # same sensor noise for every genome
+    total = 0.0
 
-    # Coulomb counting
-    self.coulomb_count -= current * dt
-    self.coulomb_count = max(0, min(self.estimated_as, self.coulomb_count))
-    self.soc_percent = (self.coulomb_count / self.estimated_as) * 100.0
+    for true_ah, nominal_ah, wiring_bus, cycles in TEST_CASES:
+        battery = Battery(true_capacity_ah=true_ah, cells=CELLS,
+                          initial_soc=100.0,
+                          voltage_noise=0.005, current_noise=0.005)
+        core = BameCore(cells=CELLS, wiring_bus=wiring_bus,
+                        capacity_ah=nominal_ah)
+        apply_genome(core, genome)
+        core.declare_full(0)   # boot: user declares full once
 
-    # Calibration accumulation
-    charge_inv_s = getattr(self, '_charge_inv_s', 5.0)
-    if current > 0:
-        self.cal_coulombs += current * dt
-        self.cal_charge_sec = 0
-    elif current < -getattr(self, 'CHARGE_CURRENT', 1.0):
-        self.cal_charge_sec += dt
-        if self.cal_charge_sec >= charge_inv_s:
-            if self.cal_coulombs > 0 or self.cal_start_voltage > 0:
-                self.log.append(f"  [{time_s:.0f}s] Segment invalidated")
-            self.cal_coulombs = 0
-            self.cal_target = 0
-            self.cal_start_voltage = 0
-            self.cal_charge_sec = 0
-    else:
-        self.cal_charge_sec = 0
+        # Mid-run SOC tracking error, sampled every 10th tick (1 s of sim
+        # time) to keep the Python callback cost down.
+        track = {'n': 0, 'err': 0.0, 'tick': 0}
+        def on_tick(bat, c, track=track):
+            track['tick'] += 1
+            if track['tick'] % 10:
+                return
+            track['err'] += abs(bat.true_soc - c.soc_percent) / 100.0
+            track['n'] += 1
 
-    # Rest detection
-    soc_blend = getattr(self, '_soc_blend', 0.05)
-    if abs(current) < self.REST_CURRENT:
-        if self.rest_since is None:
-            self.rest_since = time_s
-        stable_rest = (time_s - self.rest_since) >= self.REST_STABLE_S
+        now_ms = 0
+        n_full = 0
+        for _ in range(cycles):
+            battery.coulombs_remaining = battery.true_capacity_as
+            events, now_ms = run_one_cycle(core, battery,
+                                           DISCHARGE_A, CHARGE_A,
+                                           REST_S, now_ms, on_tick=on_tick)
+            n_full += sum(1 for _, e in events if e == EVT_FULL)
 
-        if stable_rest:
-            soc_v = self.soc_from_voltage(voltage)
-            self.soc_percent = self.soc_percent * (1 - soc_blend) + soc_v * soc_blend
-            self.coulomb_count = (self.soc_percent / 100.0) * self.estimated_as
+        # The run ends full and rested: learned capacity should match the
+        # true one, and SOC should agree with the battery model.
+        cap_err = abs(core.capacity_ah - true_ah) / true_ah
+        soc_err = abs(battery.true_soc - core.soc_percent) / 100.0
+        soc_track = track['err'] / track['n'] if track['n'] else 0.0
+        penalty = 1.0 if n_full == 0 else 0.0   # never detected FULL at all
 
-            raw = current + self.current_offset
-            self.current_offset = self.current_offset * 0.9 + raw * 0.1
+        total += 3.0 * cap_err + soc_err + 2.0 * soc_track + penalty
 
-            # Voltage calibration
-            if voltage > self.vbat_max * 0.98:
-                conv = self.CONVERGE_FAST if voltage > self.vbat_max else self.CONVERGE_SLOW
-                self.vbat_max = self.vbat_max * (1 - conv) + voltage * conv
-            if voltage < self.vbat_min * 1.05:
-                conv = self.CONVERGE_FAST if voltage < self.vbat_min else self.CONVERGE_SLOW
-                self.vbat_min = self.vbat_min * (1 - conv) + voltage * conv
+        if verbose:
+            wiring = 'bus' if wiring_bus else 'load'
+            status = 'OK' if n_full > 0 else 'NO-FULL'
+            print(f"  {true_ah:.0f}Ah/nom{nominal_ah:.1f} {wiring:4s} x{cycles}: "
+                  f"learned={core.capacity_ah:5.2f}Ah err={cap_err*100:5.1f}% "
+                  f"soc_end={soc_err*100:4.1f}% soc_track={soc_track*100:4.1f}% "
+                  f"fulls={n_full} [{status}]")
 
-            if self.cal_start_voltage == 0:
-                self.cal_start_voltage = voltage
-                self.cal_start_time = time_s
-    else:
-        self.rest_since = None
-
-    # Calibration save
-    if self.cal_target <= 0:
-        target_reached = ((time_s - self.cal_start_time) >= self.CAL_INITIAL_TIME_S
-                          and self.cal_coulombs >= self.CAL_MIN_COULOMBS)
-    else:
-        target_reached = self.cal_coulombs >= self.cal_target
-
-
-    if (target_reached and self.cal_start_voltage > 0 and self.cal_coulombs > 0
-            and abs(current) < self.REST_CURRENT
-            and self.rest_since is not None
-            and (time_s - self.rest_since) >= self.REST_STABLE_S):
-
-        v_end = voltage
-        soc_start = self.soc_from_voltage(self.cal_start_voltage)
-        soc_end = self.soc_from_voltage(v_end)
-        delta_soc = soc_start - soc_end
-
-        if delta_soc > 5.0:
-            est_ah = (self.cal_coulombs / 3600.0) / (delta_soc / 100.0)
-            if 1.0 < est_ah < 500.0:
-                weight = max(0.05, min(0.5, delta_soc / 100.0))
-                self.estimated_ah = self.estimated_ah * (1 - weight) + est_ah * weight
-                self.estimated_as = self.estimated_ah * 3600.0
-                if not self.capacity_trusted and abs(self.estimated_ah - self.nominal_ah) > self.nominal_ah * 0.05:
-                    self.capacity_trusted = True
-
-                self.estimates.append((time_s, est_ah, delta_soc, self.estimated_ah, True))
-
-        self.cal_last_delta_soc = int(delta_soc) if delta_soc > 0 else 0
-        self.cal_target = self.cal_coulombs * 2.0
-        self.cal_start_voltage = v_end
-        self.cal_start_time = time_s
-        self.cal_coulombs = 0
-
-
-def evaluate(genome, verbose=False):
-    """Run all test cases, return fitness (lower = better)."""
-    total_error = 0
-    total_tests = 0
-    penalties = 0
-
-    for true_ah, nominal_ah, cells, scenario_names in TEST_CASES:
-        for scenario_name in scenario_names:
-            dt = 1.0  # 1s steps (10x faster, same accuracy)
-            dt = 1.0
-            battery = Battery(true_ah, cells, voltage_noise=0.005)
-
-            # Generate events
-            battery_copy = Battery(true_ah, cells, voltage_noise=0.005)
-            battery_copy.coulombs_remaining = battery.coulombs_remaining
-            events = SCENARIOS[scenario_name](battery_copy, dt)
-            battery.coulombs_remaining = battery.true_capacity_as * 0.75
-
-            cal = CalibrationState(nominal_ah, cells)
-            apply_params(cal, genome)
-
-            # Monkey-patch update
-            cal.update = lambda v, c, d, t, s=cal: _patched_update(s, v, c, d, t)
-
-            v_init = battery.read_voltage(0)
-            cal.soc_percent = cal.soc_from_voltage(v_init)
-            cal.coulomb_count = (cal.soc_percent / 100.0) * cal.estimated_as
-
-            for time_s, true_current in events:
-                battery.discharge(true_current, dt)
-                v = battery.read_voltage(true_current)
-                i = battery.read_current(true_current)
-                cal.update(v, i, dt, time_s)
-
-            # Fitness components
-            cap_error = abs(cal.estimated_ah - true_ah) / true_ah
-            soc_error = abs(battery.true_soc - cal.soc_percent) / 100.0
-
-            # Penalty if no calibration achieved
-            if not cal.capacity_trusted:
-                penalties += 1
-                cap_error = abs(nominal_ah - true_ah) / true_ah  # worst case
-
-            total_error += cap_error * 3 + soc_error  # weight capacity error more
-            total_tests += 1
-
-            if verbose:
-                status = 'OK' if cal.capacity_trusted else 'FAIL'
-                print(f"  {true_ah}Ah {scenario_name:12s}: "
-                      f"est={cal.estimated_ah:5.1f}Ah err={cap_error*100:5.1f}% "
-                      f"soc_err={soc_error*100:4.1f}% [{status}]")
-
-    fitness = total_error / total_tests + penalties * 0.5
-    return fitness
+    return total / len(TEST_CASES)
 
 
 def crossover(a, b):
@@ -249,16 +176,17 @@ def format_genome(genome):
         val = genome[name]
         diff = ''
         if abs(val - default) / max(abs(default), 0.001) > 0.1:
-            diff = f' (was {default})'
-        lines.append(f"  {name:25s} = {val:10.4f}{diff}")
+            diff = f' (default {default})'
+        lines.append(f"  {name:20s} = {val:8.3f}{diff}")
     return '\n'.join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Optimize BaMe calibration parameters')
-    parser.add_argument('--generations', type=int, default=30, help='Number of generations')
-    parser.add_argument('--population', type=int, default=30, help='Population size')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser = argparse.ArgumentParser(
+        description='Optimize BaMe v2 core thresholds (bame_config_t)')
+    parser.add_argument('--generations', type=int, default=15)
+    parser.add_argument('--population', type=int, default=20)
+    parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -266,38 +194,34 @@ def main():
     pop_size = args.population
     elite_size = max(2, pop_size // 5)
 
-    # Initialize population with default + random
+    # Initialize population: firmware defaults + variations + random
     population = [make_default_genome()]
-    # Add variations around default
     for _ in range(pop_size // 3):
         population.append(mutate(make_default_genome(), rate=0.5, strength=0.3))
-    # Fill rest with random
     while len(population) < pop_size:
         population.append(make_genome())
 
     best_ever = None
     best_fitness = float('inf')
 
-    print(f"=== BaMe Parameter Optimizer ===")
-    print(f"Population: {pop_size}, Generations: {args.generations}")
-    print(f"Test cases: {sum(len(tc[3]) for tc in TEST_CASES)} scenarios")
+    print(f"=== BaMe v2 threshold optimizer (real C core) ===")
+    print(f"Population: {pop_size}, Generations: {args.generations}, "
+          f"Test cases: {len(TEST_CASES)}")
     print()
 
-    # Evaluate default first
-    default_fitness = evaluate(make_default_genome())
-    print(f"Default firmware fitness: {default_fitness:.4f}")
+    default_fitness = evaluate(make_default_genome(), args.seed)
+    print(f"Firmware-default fitness: {default_fitness:.4f}")
     print()
 
     for gen in range(args.generations):
-        # Evaluate
         scored = []
         for idx, genome in enumerate(population):
-            random.seed(args.seed)  # deterministic evaluation
-            f = evaluate(genome)
+            f = evaluate(genome, args.seed)
             scored.append((f, genome))
             done = gen * pop_size + idx + 1
             total = args.generations * pop_size
-            print(f"\r  [{done}/{total} {done*100//total}%] Gen {gen+1} ind {idx+1}/{pop_size}", end='', flush=True)
+            print(f"\r  [{done}/{total} {done*100//total}%] "
+                  f"Gen {gen+1} ind {idx+1}/{pop_size}", end='', flush=True)
         print('\r' + ' ' * 60 + '\r', end='')
 
         scored.sort(key=lambda x: x[0])
@@ -310,36 +234,30 @@ def main():
         print(f"Gen {gen+1:3d}: best={scored[0][0]:.4f} avg={avg:.4f} "
               f"best_ever={best_fitness:.4f}")
 
-        # Selection + reproduction
+        # Selection + reproduction (GA state uses its own random stream;
+        # evaluate() re-seeds internally so noise stays comparable).
+        random.seed(args.seed + gen + 1)
         elites = [g for _, g in scored[:elite_size]]
         new_pop = list(elites)
-
         while len(new_pop) < pop_size:
             if random.random() < 0.7:
-                # Crossover two elites
-                a = random.choice(elites)
-                b = random.choice(elites)
-                child = crossover(a, b)
+                child = crossover(random.choice(elites), random.choice(elites))
                 child = mutate(child, rate=0.3, strength=0.15)
             else:
-                # Mutate an elite
                 child = mutate(random.choice(elites), rate=0.5, strength=0.25)
             new_pop.append(child)
-
         population = new_pop
 
-    # Final report
     print()
-    print(f"=== Best parameters (fitness={best_fitness:.4f} vs default={default_fitness:.4f}) ===")
+    print(f"=== Best genome (fitness={best_fitness:.4f} "
+          f"vs default={default_fitness:.4f}) ===")
     print(format_genome(best_ever))
     print()
-    print(f"=== Detailed results with best parameters ===")
-    random.seed(args.seed)
-    evaluate(best_ever, verbose=True)
+    print(f"=== Detailed results with best genome ===")
+    evaluate(best_ever, args.seed, verbose=True)
     print()
-    print(f"=== Detailed results with default parameters ===")
-    random.seed(args.seed)
-    evaluate(make_default_genome(), verbose=True)
+    print(f"=== Detailed results with firmware defaults ===")
+    evaluate(make_default_genome(), args.seed, verbose=True)
 
 
 if __name__ == '__main__':

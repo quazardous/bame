@@ -36,10 +36,12 @@ EVENT_NAMES = {0: 'none', 1: 'FULL', 3: 'PARTIAL'}
 
 
 def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
-                   now_ms_ref, verbose=False):
+                   now_ms_ref, verbose=False, on_tick=None):
     """Discharge battery until near-empty, rest, recharge to FULL. Drives the
     C core with the simulated voltage/current at TICK_S granularity. No
-    BMS-cutoff sim — that event can never be observed in prod (#499)."""
+    BMS-cutoff sim — that event can never be observed in prod (#499).
+    `on_tick(battery, core)`, if given, is called after every core.step —
+    lets callers (optimize.py) sample mid-cycle SOC error."""
     events = []
     t_local = 0.0
     now_ms = now_ms_ref
@@ -50,6 +52,7 @@ def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
         v = battery.read_voltage(discharge_a)
         i = battery.read_current(discharge_a)
         evt = core.step(v, i, TICK_S, now_ms)
+        if on_tick: on_tick(battery, core)
         if evt != 0:
             events.append((t_local, evt))
             if verbose:
@@ -67,6 +70,7 @@ def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
     # Rest
     for _ in range(int(rest_s / TICK_S)):
         evt = core.step(0.0, 0.0, TICK_S, now_ms)
+        if on_tick: on_tick(battery, core)
         t_local += TICK_S
         now_ms += int(TICK_S * 1000)
 
@@ -78,6 +82,7 @@ def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
         v = battery.read_voltage(-charge_a)
         i_core = -charge_a if core.state.wiring_bus else 0.0
         evt = core.step(v, i_core, TICK_S, now_ms)
+        if on_tick: on_tick(battery, core)
         if evt != 0:
             events.append((t_local, evt))
             if verbose:
@@ -91,6 +96,7 @@ def run_one_cycle(core, battery, discharge_a, charge_a, rest_s,
         battery.step(0.0, TICK_S)
         v = battery.read_voltage(0.0)
         evt = core.step(v, 0.0, TICK_S, now_ms)
+        if on_tick: on_tick(battery, core)
         if evt != 0:
             events.append((t_local, evt))
             if verbose:

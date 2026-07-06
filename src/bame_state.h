@@ -17,7 +17,7 @@ extern const uint8_t cellCount;
 // --- Battery capacity ---
 extern float batteryCapacityNom;   // user "sticker value", reset target
 extern float batteryCapacityAh;    // learned (or nom if not yet learned)
-extern bool  capacityLearned;      // true after at least one full→cutoff cycle
+extern bool  capacityLearned;      // true once a cycle's amplitude exceeded nominal
 
 // --- Live measurements ---
 extern float voltage;

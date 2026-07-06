@@ -1,11 +1,24 @@
 # Changelog
 
+## v2.1
+
+### Amplitude-max capacity learning
+
+The BMS-cutoff measurement path is dropped: BaMe powers off the very battery it measures, so a cutoff is a power loss the firmware reboots through instead of observing. Capacity learning now hangs off the **full** event — at each full, the cycle's peak depth of discharge is compared to the current estimate, and the estimate is raised to match if the cycle delivered more. Raise-only, so it converges upward over cycles and a shallow cycle never walks it back.
+
+Docs (README, QUICKSTART, ROADMAP) realigned with this — all "full → BMS cutoff records the capacity" wording is gone.
+
+### Sim
+
+- `sim/optimize.py` rebuilt on the real C core: the genetic algorithm now evolves the actual `bame_config_t` thresholds (`v_full_per_cell`, `i_rest`, `full_rest_ms`, `v_rise_partial`, `v_disconnect_drop`, `ext_rearm_ms`) via ctypes, so a winning genome maps 1:1 onto `bame_config_defaults()`. Fitness includes mid-cycle SOC tracking error, not just end-of-run values. New `make sim-opt` target.
+- `run_one_cycle()` in `sim/calibration_sim.py` accepts an optional `on_tick` callback for per-tick sampling.
+
 ## v2.0
 
 Coulomb counting is the only source of SOC. Voltage is a display value plus a trigger for two events:
 
 - **Charger disconnect at top voltage** → "battery full", SOC reset to 100%.
-- **Voltage collapse to ~0** → BMS cutoff, the Ah delivered since the last "full" event is recorded as the capacity for that cycle.
+- **Voltage collapse to ~0** → BMS cutoff, the Ah delivered since the last "full" event is recorded as the capacity for that cycle (replaced by amplitude-max learning in v2.1).
 
 Capacity refines as cycles accumulate. Always-on (no deep sleep), so the integration never has to be guessed across a wake-up.
 

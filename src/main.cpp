@@ -1,9 +1,10 @@
 // ===========================================================================
 // BaMe v2 — pure coulomb counting
 //
-// Voltage is a display value plus a trigger for two events:
-//   - Charger disconnect at top voltage → "battery full", SOC reset to 100%
-//   - Voltage collapse → BMS cutoff, Ah delivered since last full = capacity
+// Voltage is a display value plus a trigger for the "battery full" event
+// (sustained top OCV at rest → SOC reset to 100%). Capacity is learned at
+// that event from the cycle's peak depth of discharge (amplitude-max,
+// raise-only) — a BMS cutoff cuts BaMe's own power, so it is never observed.
 //
 // In BUS install (every current passes the shunt) coulomb counting is
 // bidirectional and partial charges are tracked accurately. In LOAD install
@@ -23,7 +24,7 @@
 #include "display.h"
 #include "menu.h"
 
-#define BAME_VERSION "2.0"
+#define BAME_VERSION "2.1"
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0

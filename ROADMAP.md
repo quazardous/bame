@@ -8,7 +8,7 @@ After weeks of real-world use, see whether the coulomb integrator drifts meaning
 
 ## Non-LFP chemistries
 
-The top-OCV event and BMS cutoff logic is LFP-specific (flat curve with a distinct top plateau at 3.40 V/cell). Adapting to AGM or lead-acid would mean re-thinking the "battery full" trigger.
+The top-OCV "battery full" event is LFP-specific (flat curve with a distinct top plateau at 3.40 V/cell). Adapting to AGM or lead-acid would mean re-thinking the "battery full" trigger.
 
 ## Multi-battery
 

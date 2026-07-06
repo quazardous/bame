@@ -78,7 +78,10 @@ core-test: $(CORE_LIB)  ## Run Python smoke test against core lib
 sim-cal:  ## Run calibration sim (3 cycles, 50/80 Ah)
 	python sim/calibration_sim.py --true-capacity 50 --nominal-capacity 80 --cycles 3
 
+sim-opt:  ## Optimize core thresholds (GA over the real C core)
+	python sim/optimize.py
+
 screenshots:  ## Render UI screen mockups
 	python sim/render_screens.py
 
-.PHONY: help build upload monitor clean size list-envs core-lib core-test sim-cal screenshots
+.PHONY: help build upload monitor clean size list-envs core-lib core-test sim-cal sim-opt screenshots

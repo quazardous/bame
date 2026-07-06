@@ -6,12 +6,12 @@ A small, unambitious side project to put repurposed "dumb" golf-cart LiFePO4 bat
 
 Yes, buying a proper modern battery with its own BMS and bluetooth app would do this better. But it's more fun to poke at the problem with an Arduino, an INA226 shunt and a small OLED than to click "add to cart". If you like that kind of thing, this is that kind of thing.
 
-BaMe watches current through the shunt, integrates it, and shows you a gauge, remaining Ah, voltage, watts and estimated time. On a discharge cycle that ends at the BMS cutoff, it measures the true capacity of your pack — the value on the sticker is usually wrong.
+BaMe watches current through the shunt, integrates it, and shows you a gauge, remaining Ah, voltage, watts and estimated time. Deep discharge cycles teach it the real capacity of your pack: whenever a cycle delivers more Ah than the current estimate, the estimate rises to match — the value on the sticker is usually wrong.
 
 ## Features
 
 - **Pure coulomb counting** — charge in, charge out, tracked continuously. No voltage-SOC trick on the flat LFP curve.
-- **Capacity learned from real cycles** — each "battery full → BMS cutoff" sequence records the Ah delivered. Averaged over cycles, the learned value converges to the real capacity.
+- **Capacity learned from real cycles** — the deepest discharge since the last "battery full" is checked at the next full event; if the cycle delivered more than the current capacity estimate, the estimate rises to match. Raise-only, so BaMe learns "this pack is at least this big" and never walks the estimate back on a shallow cycle.
 - **Auto-detect "battery full"** — voltage at top OCV with low current, sustained, resets the SOC to 100%. You can also declare it manually from the menu.
 - **Auto-detect "charger attached"** (LOAD install) — voltage kicks >0.5 V on plug in, drops >0.5 V on unplug. Hysteresis filters the LFP rebond.
 - **Smoothed watts & autonomy** — EWMA on the current so a cycling fridge doesn't make the display jump.
@@ -54,7 +54,7 @@ Two topologies, picked at compile time.
 
 ### Capacity measurement
 
-When the battery goes from full to BMS cutoff, the Ah delivered through the shunt (BUS) or off a full reference (LOAD) is the measured capacity for that cycle. Multiple cycles blend into a running estimate. Until the first cycle completes, BaMe shows the sticker value with a `*`.
+BaMe powers itself from the very battery it measures, so a BMS cutoff is a power-loss event it can never witness — there is no "end of cycle" sample to record. Instead it tracks the peak depth of discharge since the last "battery full" event. At the next full event, if that peak exceeds the current capacity estimate, the estimate is raised to match (amplitude-max, raise-only). Each deep cycle proves a lower bound on the real capacity; repeated cycles converge upward to it. Until a cycle has confirmed the capacity this way, BaMe shows the sticker value with a `*`.
 
 ### SOC uncertainty
 
@@ -62,9 +62,10 @@ Voltage never "corrects" the coulomb counter — LFP's flat curve makes that cor
 
 ### Events BaMe listens for
 
-- **Full** — voltage ≥ top OCV with rest current, sustained → SOC = 100%, start of a new cycle
-- **BMS cutoff** — voltage collapses → close the cycle, record the capacity sample
+- **Full** — voltage ≥ top OCV with rest current, sustained → SOC = 100%, close the cycle (capacity may be raised), start a new one
 - **Charger plug / unplug** (LOAD only) — rapid voltage rise / drop, detected via a slow-moving average that can't keep up with real chargers
+
+A BMS cutoff is deliberately *not* an event: it cuts BaMe's own power supply, so the firmware reboots instead of observing it. That's why capacity learning hangs off the full event.
 
 ## Build
 
