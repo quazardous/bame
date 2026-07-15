@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.5"
+BAME_VERSION = "2.6"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)

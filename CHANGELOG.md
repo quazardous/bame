@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.6
+
+### INA226 diagnostic helper
+
+New standalone firmware (`src/diag_ina226.cpp`, built via the `diag-prod` / `diag-nano` envs — `build_src_filter` compiles only it) for bench-debugging an INA226 install when the main firmware sits on "No Battery". It checks the sensor ACKs on I2C at 0x40 and matches its manufacturer/die IDs, shows a basic **live bus voltage + current** readout on the OLED, and — when the chip answers but reads ~0 V — points at the VBUS wiring. If 0x40 doesn't answer it runs an I2C bus scan and lists the addresses found in big font, so "not powered / not wired" (only `3C`) is distinguishable from "wrong address" (e.g. `3C 44`). Mirrors everything to Serial at 115200.
+
+The base `build_src_filter` keeps `diag_ina226.cpp` out of every normal build (it has its own `setup()`/`loop()`).
+
 ## v2.5 — plug-and-forget (`v2` branch)
 
 ### No runtime UI
