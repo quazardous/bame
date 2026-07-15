@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — `v2` branch (plug-and-forget)
+## v2.5 — plug-and-forget (`v2` branch)
 
 ### No runtime UI
 

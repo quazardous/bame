@@ -6,16 +6,17 @@ A small, unambitious side project to put repurposed "dumb" golf-cart LiFePO4 bat
 
 Yes, buying a proper modern battery with its own BMS and bluetooth app would do this better. But it's more fun to poke at the problem with an Arduino, an INA226 shunt and a small OLED than to click "add to cart". If you like that kind of thing, this is that kind of thing.
 
-BaMe watches current through the shunt, integrates it, and shows you a gauge, remaining Ah, voltage, watts and estimated time. Deep discharge cycles teach it the real capacity of your pack: whenever a cycle delivers more Ah than the current estimate, the estimate rises to match — the value on the sticker is usually wrong.
+BaMe watches current through the shunt, integrates it, and shows you a gauge, remaining Ah, voltage, watts and estimated time. Real cycles teach it the true capacity of your pack — the sticker value is usually wrong — and on a BUS install the estimate even tracks *down* as the pack ages.
 
 ## Features
 
 - **Pure coulomb counting** — charge in, charge out, tracked continuously. No voltage-SOC trick on the flat LFP curve.
-- **Capacity learned from real cycles** — the deepest discharge since the last "battery full" is checked at the next full event; if the cycle delivered more than the current capacity estimate, the estimate rises to match. Raise-only, so BaMe learns "this pack is at least this big" and never walks the estimate back on a shallow cycle.
+- **Capacity learned from real cycles** — on a BUS install BaMe measures capacity between two rest-voltage anchors (the *full* plateau at the top of the LFP curve and the *knee* at the bottom) and averages it, so the estimate moves **up and down** and follows a pack that loses capacity as it ages. On a LOAD install (charger invisible to the shunt) it's raise-only: the estimate rises to the deepest discharge seen and never walks back.
+- **Plug-and-forget** — no buttons, no menu. Cell count, wiring and starting capacity are set at build time; wire it in and leave it. The OLED sleeps after 2 min and wakes on any electrical activity.
 - **Auto-detect "battery full"** — voltage at top OCV with low current, sustained, resets the SOC to 100%.
 - **Auto-detect "charger attached"** (LOAD install) — voltage kicks >0.5 V on plug in, drops >0.5 V on unplug. Hysteresis filters the LFP rebond.
 - **Smoothed watts & autonomy** — EWMA on the current so a cycling fridge doesn't make the display jump.
-- **Configurable at build time** — cell count, wiring topology, voltage window. See `platformio.ini`.
+- **Configurable at build time** — cell count, wiring topology, starting capacity. See `platformio.ini`.
 
 ## Screenshots
 
@@ -46,7 +47,12 @@ Two topologies, picked at compile time.
 
 ### Capacity measurement
 
-BaMe powers itself from the very battery it measures, so a BMS cutoff is a power-loss event it can never witness — there is no "end of cycle" sample to record. Instead it tracks the peak depth of discharge since the last "battery full" event. At the next full event, if that peak exceeds the current capacity estimate, the estimate is raised to match (amplitude-max, raise-only). Each deep cycle proves a lower bound on the real capacity; repeated cycles converge upward to it. Until a cycle has confirmed the capacity this way, BaMe shows the sticker value with a `*`.
+BaMe powers itself from the very battery it measures, so a BMS cutoff is a power-loss event it can never witness. Capacity is instead learned from rest-voltage anchors on the steep parts of the LFP curve:
+
+- **BUS** — every current passes the shunt, so the Ah moved between the *full* anchor (top OCV plateau) and the *knee* anchor (bottom of the curve, read at rest) is measured exactly. That Ah over the SOC swing gives an absolute capacity, averaged (EWMA) across cycles — it moves **up and down**, so it tracks a pack that loses capacity as it ages. Cycles that never rest at the knee produce no measurement, so a light-use estimate is never wrongly lowered.
+- **LOAD** — the charger bypasses the shunt, so there is no bottom-anchor charge leg to measure. BaMe falls back to raise-only: at each full event it raises the estimate to the deepest discharge seen since the last full, never lowering it.
+
+Until a cycle has measured the capacity, BaMe shows the sticker value with a `*`.
 
 ### SOC uncertainty
 
@@ -54,10 +60,11 @@ Voltage never "corrects" the coulomb counter — LFP's flat curve makes that cor
 
 ### Events BaMe listens for
 
-- **Full** — voltage ≥ top OCV with rest current, sustained → SOC = 100%, close the cycle (capacity may be raised), start a new one
+- **Full** — voltage ≥ top OCV with rest current, sustained → SOC = 100%, and the top capacity anchor
+- **Knee** (BUS) — rest voltage at the bottom of the LFP curve → the low anchor that lets capacity be measured against the full anchor
 - **Charger plug / unplug** (LOAD only) — rapid voltage rise / drop, detected via a slow-moving average that can't keep up with real chargers
 
-A BMS cutoff is deliberately *not* an event: it cuts BaMe's own power supply, so the firmware reboots instead of observing it. That's why capacity learning hangs off the full event.
+A BMS cutoff is deliberately *not* an event: it cuts BaMe's own power supply, so the firmware reboots instead of observing it — which is why capacity is learned from the rest-voltage anchors above, not from an "empty" sample.
 
 ## Build
 
