@@ -13,3 +13,5 @@ sim/bame_core.so
 sim/bame_core.dylib
 sim/libbame_core.so
 sim/libbame_core.dylib
+.aiball.yaml
+.mcp.json
