@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.4
+
+### Bidirectional, aging-aware capacity learning (BUS)
+
+Raise-only learning could only ever *raise* the estimate, so an aging pack kept an optimistic capacity forever — bad for an unattended install. BUS installs now learn capacity from **two rest-OCV anchors**: FULL (top plateau, ≥ 3.40 V/cell) and a new **KNEE** anchor (bottom of the LFP curve, ≤ 3.05 V/cell at rest). Between two opposite anchors the exact Ah moved (BUS sees all current) divided by the SOC swing read from the OCV curve gives an absolute capacity, EWMA-smoothed — so the estimate moves **up and down** and tracks a pack that loses capacity over the years.
+
+- Cycles that never rest at the knee (soft usage) produce no measurement → the estimate holds, never wrongly lowered.
+- Partial "trip charges" that never reach full don't corrupt anything: BUS coulomb counting integrates them, and the measurement only cares about the Ah between two anchors, not the path. A periodic full charge (leaving/returning from a trip) supplies the top anchor and re-syncs SOC.
+- LOAD installs keep the raise-only amplitude-max learning — the charger is invisible to the shunt there, so there is no bottom-anchor charge leg to average against.
+- New `bame_config_t` tunables: `v_knee_per_cell` (3.05), `cap_ewma_alpha` (0.35).
+
+Validated in `sim/aging_proto.py` (drives the real C core): a pack aging 2.0 → 1.4 Ah is tracked to ~2 % vs ~24 % for raise-only, stable with no aging, and no false drift on knee-less usage.
+
+Anchor state is RAM-only for now; the learned capacity itself persists in EEPROM. Persisting the in-flight anchor pair rides with the planned EEPROM hardening (see ROADMAP).
+
 ## v2.3
 
 ### No-battery detection is now voltage-gated

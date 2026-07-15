@@ -9,6 +9,43 @@ static float f_clampf(float x, float lo, float hi) {
     return x;
 }
 
+// LFP per-cell OCV→SOC curve (matches sim/_battery.py). Only the steep top and
+// bottom regions are ever read for SOC (the flat middle is unusable), but the
+// full table keeps the interpolation simple.
+static float soc_from_v_percell(float v) {
+    static const float V[] = {3.65f, 3.40f, 3.35f, 3.325f, 3.30f, 3.275f,
+                              3.25f, 3.20f, 3.00f, 2.75f, 2.50f};
+    static const float S[] = {100.0f, 99.0f, 90.0f, 70.0f, 40.0f, 30.0f,
+                              20.0f, 17.0f, 14.0f, 9.0f, 0.0f};
+    const int N = 11;
+    if (v >= V[0]) return S[0];
+    if (v <= V[N - 1]) return S[N - 1];
+    for (int i = 0; i < N - 1; i++) {
+        if (v >= V[i + 1]) {
+            float r = (v - V[i + 1]) / (V[i] - V[i + 1]);
+            return S[i + 1] + r * (S[i] - S[i + 1]);
+        }
+    }
+    return S[N - 1];
+}
+
+// BUS two-anchor measurement: capacity from the Ah moved between the last
+// anchor and this one, scaled by the SOC swing. Requires a meaningful swing
+// (steep-region anchors only) so noise on either OCV read stays bounded.
+#define BAME_MIN_DSOC 0.30f
+static void bame__measure(bame_state_t* s, const bame_config_t* cfg, float soc_now) {
+    float dsoc = f_absf(soc_now - s->soc_at_last_anchor) / 100.0f;
+    if (dsoc > BAME_MIN_DSOC) {
+        float span_ah = f_absf(s->coulomb_count - s->coulomb_at_last_anchor) / 3600.0f;
+        float meas = span_ah / dsoc;   // extrapolate the swing to full 0–100 %
+        if (meas >= cfg->cap_min_ah && meas <= cfg->cap_max_ah) {
+            s->capacity_ah = (1.0f - cfg->cap_ewma_alpha) * s->capacity_ah
+                           + cfg->cap_ewma_alpha * meas;
+            s->capacity_learned = true;
+        }
+    }
+}
+
 
 void bame_config_defaults(bame_config_t* cfg) {
     cfg->v_full_per_cell  = 3.40f;
@@ -21,6 +58,8 @@ void bame_config_defaults(bame_config_t* cfg) {
     cfg->v_rise_partial   = 0.05f;
     cfg->v_disconnect_drop = 0.5f;
     cfg->ext_rearm_ms     = 15000u;
+    cfg->v_knee_per_cell  = 3.05f;
+    cfg->cap_ewma_alpha   = 0.35f;
 }
 
 
@@ -46,6 +85,12 @@ void bame_init(bame_state_t* s, uint8_t cells, bool wiring_bus,
     s->charging_external  = false;
     s->ext_charge_armed   = true;   // first ever "at top" can trigger the flag
     s->below_top_since_ms = 0u;
+    s->last_anchor_kind   = 0u;
+    s->coulomb_at_last_anchor = 0.0f;
+    s->soc_at_last_anchor = 0.0f;
+    s->rest_at_knee_since_ms = 0u;
+    s->full_armed         = true;
+    s->knee_armed         = true;
 }
 
 
@@ -69,7 +114,10 @@ float bame_soc_percent(const bame_state_t* s) {
 // FULL-event learning loop is the only viable convergence path.
 void bame_declare_full(bame_state_t* s, const bame_config_t* cfg,
                        uint32_t now_ms) {
-    if (s->max_delivered_c_in_cycle > 0.0f) {
+    // LOAD install: raise-only amplitude-max (charge is invisible, so there is
+    // no bottom anchor to average against). BUS uses the two-anchor learner in
+    // bame_step instead, which can also lower the estimate as the pack ages.
+    if (!s->wiring_bus && s->max_delivered_c_in_cycle > 0.0f) {
         float observed_ah = s->max_delivered_c_in_cycle / 3600.0f;
         if (observed_ah > s->capacity_ah
                 && observed_ah >= cfg->cap_min_ah
@@ -215,16 +263,50 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
     bame_event_t evt = BAME_EVT_NONE;
 
     // --- Full-event detection (BUS + LOAD, same trigger) ---
-    bool at_top = (voltage_raw / (float)s->cells) >= cfg->v_full_per_cell
-               && f_absf(c) < cfg->i_rest;
+    float v_cell = voltage_raw / (float)s->cells;
+    bool  rest   = f_absf(c) < cfg->i_rest;
+    bool at_top = v_cell >= cfg->v_full_per_cell && rest;
     if (at_top) {
         if (s->rest_at_top_since_ms == 0u) s->rest_at_top_since_ms = now_ms;
-        if ((now_ms - s->rest_at_top_since_ms) >= cfg->full_rest_ms) {
-            bame_declare_full(s, cfg, now_ms);
+        if (s->full_armed && (now_ms - s->rest_at_top_since_ms) >= cfg->full_rest_ms) {
+            // BUS: close a KNEE→FULL span using the pre-reset coulomb count,
+            // then re-anchor to FULL with the post-reset baseline below.
+            if (s->wiring_bus && s->last_anchor_kind == 2u) {
+                bame__measure(s, cfg, soc_from_v_percell(v_cell));
+            }
+            bame_declare_full(s, cfg, now_ms);   // resets coulomb (raise-only if LOAD)
             evt = BAME_EVT_FULL;
+            if (s->wiring_bus) {
+                s->last_anchor_kind       = 1u;
+                s->soc_at_last_anchor     = soc_from_v_percell(v_cell);
+                s->coulomb_at_last_anchor = s->coulomb_count;  // post-reset = capacity
+            }
+            s->full_armed = false;   // one FULL per top visit
         }
     } else {
         s->rest_at_top_since_ms = 0u;
+        if (v_cell < cfg->v_full_per_cell - 0.02f) s->full_armed = true;
+    }
+
+    // --- BUS KNEE-anchor detection (bottom of the LFP curve, at rest) ---
+    // The second SOC anchor that makes learning bidirectional. LOAD can't use
+    // it for the charge leg (charger invisible), so it stays BUS-only here.
+    if (s->wiring_bus) {
+        bool at_knee = rest && v_cell <= cfg->v_knee_per_cell;
+        if (at_knee) {
+            if (s->rest_at_knee_since_ms == 0u) s->rest_at_knee_since_ms = now_ms;
+            if (s->knee_armed && (now_ms - s->rest_at_knee_since_ms) >= cfg->full_rest_ms) {
+                float soc = soc_from_v_percell(v_cell);
+                if (s->last_anchor_kind == 1u) bame__measure(s, cfg, soc);  // FULL→KNEE
+                s->last_anchor_kind       = 2u;
+                s->soc_at_last_anchor     = soc;
+                s->coulomb_at_last_anchor = s->coulomb_count;
+                s->knee_armed = false;   // one KNEE per bottom visit
+            }
+        } else {
+            s->rest_at_knee_since_ms = 0u;
+            if (v_cell > cfg->v_knee_per_cell + 0.02f) s->knee_armed = true;
+        }
     }
 
     // --- LOAD-mode partial-charge detection: unexplained V rise ---

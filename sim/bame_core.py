@@ -47,6 +47,8 @@ class BameConfig(Structure):
         ("v_rise_partial",        c_float),
         ("v_disconnect_drop",     c_float),
         ("ext_rearm_ms",          c_uint32),
+        ("v_knee_per_cell",       c_float),
+        ("cap_ewma_alpha",        c_float),
     ]
 
 
@@ -72,6 +74,12 @@ class BameState(Structure):
         ("charging_external",        c_bool),
         ("ext_charge_armed",         c_bool),
         ("below_top_since_ms",       c_uint32),
+        ("last_anchor_kind",         c_uint8),
+        ("coulomb_at_last_anchor",   c_float),
+        ("soc_at_last_anchor",       c_float),
+        ("rest_at_knee_since_ms",    c_uint32),
+        ("full_armed",               c_bool),
+        ("knee_armed",               c_bool),
     ]
 
 

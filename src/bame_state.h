@@ -7,7 +7,7 @@
 #include "BameGFX.h"
 
 // --- Firmware version (serial banner + no-battery splash) ---
-#define BAME_VERSION "2.3"
+#define BAME_VERSION "2.4"
 
 // --- Hardware objects ---
 extern Adafruit_SSD1306 display;

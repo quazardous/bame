@@ -36,6 +36,9 @@ typedef struct {
     float    v_disconnect_drop;  // 0.5   — LOAD mode: V drop > this (fast) = charger unplug
     uint32_t ext_rearm_ms;       // 15000 — V must stay below top this long to re-arm
                                  //          (filters out post-disconnect LFP rebond)
+    // BUS-only bidirectional (aging-aware) capacity learning:
+    float    v_knee_per_cell;    // 3.05  — rest V/cell at/below this = KNEE anchor
+    float    cap_ewma_alpha;     // 0.35  — capacity EWMA weight per two-anchor measure
 } bame_config_t;
 
 
@@ -81,6 +84,16 @@ typedef struct {
                                   // (one-shot; consumed on entry, re-armed after a sustained
                                   //  below-top dip, NOT a brief post-disconnect rebond)
     uint32_t below_top_since_ms;  // millis when voltage first went below top (0 = not tracking)
+
+    // --- BUS two-anchor capacity learning (aging-aware) ---
+    // Capacity = EWMA of ΔAh/ΔSOC measured between a FULL (top OCV) and a KNEE
+    // (bottom OCV) rest anchor. Moves up AND down, so an aging pack is tracked.
+    uint8_t  last_anchor_kind;       // 0 none, 1 full, 2 knee
+    float    coulomb_at_last_anchor; // coulomb_count sampled at the last anchor
+    float    soc_at_last_anchor;     // SOC% read from the OCV curve at that anchor
+    uint32_t rest_at_knee_since_ms;  // sustained-rest timer for the KNEE anchor
+    bool     full_armed;             // FULL anchor one-shot per top visit
+    bool     knee_armed;             // KNEE anchor one-shot per bottom visit
 } bame_state_t;
 
 
