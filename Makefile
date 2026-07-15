@@ -10,13 +10,61 @@ ENV ?= nano-bus-4s
 .DEFAULT_GOAL := help
 
 ifeq ($(OS),Windows_NT)
-HELP_CMD = powershell -NoProfile -Command "Write-Host 'Usage: make <target>'; Write-Host ''; Write-Host 'Targets:'; Select-String -Path Makefile -Pattern '^[a-zA-Z_-]+:.*##' | ForEach-Object { $$p = $$_.Line -split ':[^#]*##\s*', 2; '  {0,-15} {1}' -f $$p[0], $$p[1] }"
+HELP_CMD = powershell -NoProfile -Command "Write-Host 'Usage: make <target>'; Write-Host ''; Write-Host 'Targets:'; Select-String -Path Makefile -Pattern '^[a-zA-Z_-]+:.*\#\#' | ForEach-Object { $$p = $$_.Line -split ':[^\#]*\#\#\s*', 2; '  {0,-15} {1}' -f $$p[0], $$p[1] }"
 else
-HELP_CMD = echo "Usage: make <target>"; echo ""; echo "Targets:"; grep -E '^[a-zA-Z_-]+:.*##' Makefile | sed 's/:[^#]*##[ 	]*/	/'
+HELP_CMD = echo "Usage: make <target>"; echo ""; echo "Targets:"; grep -E '^[a-zA-Z_-]+:.*\#\#' Makefile | sed 's/:[^\#]*\#\#[ 	]*/	/'
 endif
 
 help:  ## Show this help
 	@$(HELP_CMD)
+
+# --- Host setup ---------------------------------------------------------
+# One-shot dev-env install for Linux/macOS — the counterpart to setup.ps1.
+# Installs the C compiler, avrdude (ISP flashing), PlatformIO and Pillow.
+# PlatformIO goes through pipx (isolated venv) so it sidesteps PEP 668 AND
+# repairs a broken pip install: `pipx install --force` rebuilds it clean.
+
+setup:  ## Install/repair host toolchain (gcc, avrdude, PlatformIO, Pillow)
+	@set -e; \
+	echo ">> BaMe host setup"; \
+	if   command -v dnf     >/dev/null 2>&1; then PKG="sudo dnf install -y";       SYS="gcc avrdude python3 python3-pip pipx python3-pillow"; \
+	elif command -v apt-get >/dev/null 2>&1; then PKG="sudo apt-get install -y";   SYS="build-essential avrdude python3 python3-pip pipx python3-pil"; \
+	elif command -v pacman  >/dev/null 2>&1; then PKG="sudo pacman -S --noconfirm";SYS="gcc avrdude python python-pipx python-pillow"; \
+	elif command -v zypper  >/dev/null 2>&1; then PKG="sudo zypper install -y";    SYS="gcc avrdude python3 python3-pipx python3-Pillow"; \
+	elif command -v brew    >/dev/null 2>&1; then PKG="brew install";              SYS="avrdude pipx"; \
+	else echo "!! no supported package manager (dnf/apt/pacman/zypper/brew)."; \
+	     echo "   install by hand: gcc, avrdude, pipx, python3 Pillow."; exit 1; fi; \
+	echo ">> system packages: $$SYS"; \
+	$$PKG $$SYS; \
+	echo ">> PlatformIO via pipx (isolated; --force also repairs a broken install)"; \
+	pipx install --force platformio; \
+	pipx ensurepath >/dev/null 2>&1 || true; \
+	if ! python3 -c "import PIL" >/dev/null 2>&1; then \
+	  echo ">> Pillow not found from system pkg — trying pip --user"; \
+	  python3 -m pip install --user Pillow || echo "!! install Pillow manually"; \
+	fi; \
+	echo ">> done. Open a fresh shell so PATH picks up pipx, then: make check"
+
+check:  ## Verify the host toolchain is present
+	@ok=1; \
+	if command -v gcc >/dev/null 2>&1; then printf "  ok    %-9s %s\n" gcc "$$(gcc --version | head -1)"; \
+	  else printf "  MISS  %-9s (run: make setup)\n" gcc; ok=0; fi; \
+	if command -v avrdude >/dev/null 2>&1; then printf "  ok    %-9s %s\n" avrdude "$$(avrdude '-?' 2>&1 | grep -io 'version [0-9][^ ,]*' | head -1)"; \
+	  else printf "  MISS  %-9s (run: make setup)\n" avrdude; ok=0; fi; \
+	if command -v python3 >/dev/null 2>&1; then printf "  ok    %-9s %s\n" python3 "$$(python3 --version 2>&1)"; \
+	  else printf "  MISS  %-9s (run: make setup)\n" python3; ok=0; fi; \
+	if pio --version >/dev/null 2>&1; then printf "  ok    %-9s %s\n" pio "$$(pio --version 2>&1)"; \
+	  else printf "  MISS  %-9s (absent or broken — run: make setup)\n" pio; ok=0; fi; \
+	if python3 -c "import PIL" >/dev/null 2>&1; then printf "  ok    %-9s %s\n" Pillow "$$(python3 -c 'import PIL; print(PIL.__version__)')"; \
+	  else printf "  MISS  %-9s (run: make setup)\n" Pillow; ok=0; fi; \
+	if [ $$ok = 1 ]; then echo ">> toolchain OK"; else echo ">> issues above — run: make setup"; exit 1; fi
+
+setup-udev:  ## Install PlatformIO udev rules (flash without sudo — Linux)
+	@echo ">> installing PlatformIO udev rules (grants USBasp/serial access to your login)"; \
+	curl -fsSL https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules \
+	  | sudo tee /etc/udev/rules.d/99-platformio-udev.rules >/dev/null; \
+	sudo udevadm control --reload-rules; sudo udevadm trigger; \
+	echo ">> done — replug the USBasp (re-login if a group was added)"
 
 # --- Firmware ---
 
@@ -31,6 +79,10 @@ monitor:  ## Open serial monitor
 
 clean:  ## Clean PlatformIO build artifacts
 	pio run -t clean
+
+distclean:  ## Deep clean: PlatformIO cache + sim shared libs
+	rm -rf .pio
+	rm -f sim/bame_core.dll sim/libbame_core.so sim/libbame_core.dylib sim/bame_core.so
 
 size:  ## Show Flash/RAM usage for $(ENV)
 	@pio run -e $(ENV) 2>&1 | grep -E "Flash|RAM" | head -2
@@ -84,4 +136,4 @@ sim-opt:  ## Optimize core thresholds (GA over the real C core)
 screenshots:  ## Render UI screen mockups
 	python sim/render_screens.py
 
-.PHONY: help build upload monitor clean size list-envs core-lib core-test sim-cal sim-opt screenshots
+.PHONY: help setup check setup-udev build upload monitor clean distclean size list-envs core-lib core-test sim-cal sim-opt screenshots
