@@ -20,6 +20,8 @@
 // ===========================================================================
 
 #include <Arduino.h>
+#include <stdio.h>
+#include <string.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <INA226.h>
@@ -37,18 +39,25 @@ static bool     inaOk    = false;
 static uint16_t mfgId    = 0;
 static uint16_t dieId    = 0;
 static int      shuntErr = 0;
+static char     foundAddrs[30] = "";   // hex list of every I2C address that ACKs
 
-static void i2cScanSerial() {
+static void i2cScan() {
   Serial.println(F("I2C scan:"));
+  foundAddrs[0] = '\0';
   uint8_t n = 0;
+  char* p = foundAddrs;
   for (uint8_t a = 0x03; a < 0x78; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
       Serial.print(F("  found 0x")); Serial.println(a, HEX);
       n++;
+      if (p - foundAddrs < (int)sizeof(foundAddrs) - 4) {
+        if (p != foundAddrs) *p++ = ' ';
+        p += sprintf(p, "%02X", a);
+      }
     }
   }
-  if (!n) Serial.println(F("  (nothing responded — check SDA/SCL/pullups/power)"));
+  if (!n) { strcpy(foundAddrs, "none"); Serial.println(F("  (nothing responded)")); }
 }
 
 void setup() {
@@ -63,7 +72,7 @@ void setup() {
     display.setTextSize(1);
   }
 
-  i2cScanSerial();
+  i2cScan();
 
   ina.begin();
   inaOk = ina.isConnected();       // reads manufacturer ID under the hood
@@ -123,9 +132,14 @@ void loop() {
         display.print(F("VBUS pin wiring"));
       }
     } else {
-      display.setCursor(0, 16); display.print(F("check SDA/SCL,"));
-      display.setCursor(0, 28); display.print(F("addr 0x40, 5V,"));
-      display.setCursor(0, 40); display.print(F("I2C pullups"));
+      // INA226 didn't ACK at 0x40 — show what IS on the bus so you can tell
+      // "not powered / not wired" (only 3C) from "wrong address" (e.g. 3C 44).
+      display.setCursor(0, 14); display.print(F("I2C found:"));
+      display.setTextSize(2);
+      display.setCursor(0, 26); display.print(foundAddrs);
+      display.setTextSize(1);
+      display.setCursor(0, 48); display.print(F("INA226 not at 0x40"));
+      display.setCursor(0, 56); display.print(F("chk VCC/SDA/SCL/addr"));
     }
     display.display();
   }
