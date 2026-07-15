@@ -63,13 +63,37 @@
 #define SCREEN_WAKE_I      0.05f     // |current| (A) past the dead-band = activity
 #define SCREEN_WAKE_DV     0.05f     // voltage step (V) between ticks = activity
 
-// --- EEPROM layout ---
-#define EEPROM_LEARN_MAGIC_ADDR  16
-#define EEPROM_LEARN_VAL         0xEE
-#define EEPROM_LEARN_DATA_ADDR   17      // float
-#define EEPROM_COULOMB_MAGIC_ADDR 21
-#define EEPROM_COULOMB_VAL       0xCC
-#define EEPROM_COULOMB_DATA_ADDR 22      // float
+// --- EEPROM: wear-leveled, CRC-checked ring buffer ---
+// One "live" record (coulomb counter + learned capacity + two-anchor state)
+// rotates across EEPROM_NUM_SLOTS slots, each stamped with an incrementing
+// sequence number and a CRC8. On boot the newest slot with a valid CRC wins;
+// a torn write (reset mid-save) fails the CRC and the previous slot is used.
+// Rotating the slot spreads the ~5-min writes so no single cell wears out
+// (32 slots → decades vs ~1 year at a fixed address).
+#define EEPROM_NUM_SLOTS   32
+#define EEPROM_SAVE_DELTA_AS 5.0f   // skip the periodic write below this drift (idle van)
+
+struct __attribute__((packed)) EepromRecord {
+  uint16_t seq;
+  float    coulomb;
+  float    capacity;
+  uint8_t  learned;
+  uint8_t  anchor_kind;
+  float    coulomb_at_anchor;
+  float    soc_at_anchor;
+  uint8_t  crc;               // CRC8 over every byte before this one
+};
+#define EEPROM_SLOT_SIZE ((uint8_t)sizeof(EepromRecord))
+
+static uint8_t crc8(const uint8_t* d, uint8_t n) {
+  uint8_t c = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    c ^= d[i];
+    for (uint8_t b = 0; b < 8; b++)
+      c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x07) : (uint8_t)(c << 1);
+  }
+  return c;
+}
 
 // ===========================================================================
 // Hardware objects (definitions for externs in bame_state.h)
@@ -101,32 +125,67 @@ unsigned long lastDisplay = 0;
 static unsigned long lastEepromSaveMs = 0;
 
 // ===========================================================================
-// EEPROM persistence (learned capacity + running coulomb counter)
-// ===========================================================================
-static void saveFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float val) {
-  EEPROM.update(magicAddr, magicVal);
-  EEPROM.put(dataAddr, val);   // EEPROM.put already skips unchanged bytes
-}
-static bool loadFloatEEPROM(uint8_t magicAddr, uint8_t magicVal, uint8_t dataAddr, float &val) {
-  if (EEPROM.read(magicAddr) != magicVal) return false;
-  EEPROM.get(dataAddr, val);
-  return true;
-}
-
-static void saveLearnedEEPROM() {
-  saveFloatEEPROM(EEPROM_LEARN_MAGIC_ADDR, EEPROM_LEARN_VAL, EEPROM_LEARN_DATA_ADDR, batteryCapacityAh);
-}
-static void saveCoulombEEPROM() {
-  saveFloatEEPROM(EEPROM_COULOMB_MAGIC_ADDR, EEPROM_COULOMB_VAL, EEPROM_COULOMB_DATA_ADDR, coulombCount);
-}
-
-// ===========================================================================
 // BaMe core wrapper — the algo runs out of bame_core.c (shared with sim).
 // This layer handles Arduino-specific plumbing: INA226 reads, EEPROM
 // persistence, and mirroring the state into the display externs.
 // ===========================================================================
 static bame_state_t  bame;
 static bame_config_t bame_cfg;
+
+// --- EEPROM ring-buffer persistence ---
+static uint16_t eeSeq          = 0;
+static int16_t  eeSlot         = -1;   // last written slot; next write is eeSlot+1
+static float    lastSavedCoulomb = 0;
+static uint8_t  lastSavedAnchor  = 0;
+
+// Write the current core state to the next ring slot.
+static void eepromSave() {
+  eeSlot = (int16_t)((eeSlot + 1) % EEPROM_NUM_SLOTS);
+  eeSeq++;
+  EepromRecord r;
+  r.seq               = eeSeq;
+  r.coulomb           = bame.coulomb_count;
+  r.capacity          = bame.capacity_ah;
+  r.learned           = bame.capacity_learned ? 1 : 0;
+  r.anchor_kind       = bame.last_anchor_kind;
+  r.coulomb_at_anchor = bame.coulomb_at_last_anchor;
+  r.soc_at_anchor     = bame.soc_at_last_anchor;
+  r.crc               = crc8((const uint8_t*)&r, EEPROM_SLOT_SIZE - 1);
+  EEPROM.put(eeSlot * EEPROM_SLOT_SIZE, r);   // put() skips unchanged bytes
+  lastSavedCoulomb = bame.coulomb_count;
+  lastSavedAnchor  = bame.last_anchor_kind;
+}
+
+// Scan every slot, restore the newest CRC-valid record into the core state.
+static void eepromLoad() {
+  EepromRecord best;
+  bool found = false;
+  for (uint8_t i = 0; i < EEPROM_NUM_SLOTS; i++) {
+    EepromRecord r;
+    EEPROM.get(i * EEPROM_SLOT_SIZE, r);
+    if (crc8((const uint8_t*)&r, EEPROM_SLOT_SIZE - 1) != r.crc) continue;
+    if (!found || (int16_t)(r.seq - best.seq) > 0) { best = r; found = true; eeSlot = (int16_t)i; }
+  }
+  if (!found) { eeSlot = -1; eeSeq = 0; return; }   // blank/garbage EEPROM → defaults
+  eeSeq = best.seq;
+
+  if (best.capacity >= CAPACITY_MIN && best.capacity <= CAPACITY_MAX) {
+    bame.capacity_ah      = best.capacity;
+    bame.capacity_learned = best.learned != 0;
+  }
+  // Guard the counter against a CRC-colliding garbage slot (NaN fails all
+  // comparisons, so the core's first-tick clamp wouldn't catch it).
+  float cap_as = bame.capacity_ah * 3600.0f;
+  if (best.coulomb == best.coulomb                       // not NaN
+      && best.coulomb > -cap_as && best.coulomb < cap_as * 1.2f) {
+    bame.coulomb_count = best.coulomb;
+  }
+  if (best.anchor_kind <= 2) {
+    bame.last_anchor_kind       = best.anchor_kind;
+    bame.coulomb_at_last_anchor = best.coulomb_at_anchor;
+    bame.soc_at_last_anchor     = best.soc_at_anchor;
+  }
+}
 
 // ===========================================================================
 // Screen power management (no wake button in the install → activity-driven)
@@ -191,16 +250,17 @@ static void updateMeasurements() {
   capacityLearned = bame.capacity_learned;
   batteryCapacityAh = bame.capacity_ah;
 
-  // Persist on FULL — capacity may have changed (learning) and coulomb_count
-  // was reset to top.
+  // Persist to the ring buffer on a FULL (capacity/anchor just changed), or on
+  // the periodic tick — but skip the periodic write when nothing meaningful
+  // moved, so a van parked idle for weeks doesn't burn the ring for nothing.
   if (evt == BAME_EVT_FULL) {
-    saveCoulombEEPROM();
-    saveLearnedEEPROM();
-  }
-
-  // Periodic save so a power loss doesn't wipe the integrator.
-  if ((now - lastEepromSaveMs) >= EEPROM_SAVE_INTERVAL_MS) {
-    saveCoulombEEPROM();
+    eepromSave();
+    lastEepromSaveMs = now;
+  } else if ((now - lastEepromSaveMs) >= EEPROM_SAVE_INTERVAL_MS) {
+    if (fabsf(bame.coulomb_count - lastSavedCoulomb) > EEPROM_SAVE_DELTA_AS
+        || bame.last_anchor_kind != lastSavedAnchor) {
+      eepromSave();
+    }
     lastEepromSaveMs = now;
   }
 
@@ -229,22 +289,15 @@ void setup() {
   bame_config_defaults(&bame_cfg);
   bame_init(&bame, BAME_CELLS, (BAME_WIRING_BUS != 0), BATTERY_CAPACITY_AH);
 
-  // Restore persistent state: learned capacity (measured) + running coulomb
-  // counter. Each slot is independent — a missing slot leaves the core at its
-  // init defaults (compile-time nominal capacity, assumed-full counter).
-  float v;
-  if (loadFloatEEPROM(EEPROM_LEARN_MAGIC_ADDR, EEPROM_LEARN_VAL, EEPROM_LEARN_DATA_ADDR, v)
-      && v >= CAPACITY_MIN && v <= CAPACITY_MAX) {
-    bame.capacity_ah      = v;
-    bame.capacity_learned = true;
-    batteryCapacityAh     = v;
-    capacityLearned       = true;
-  }
-  if (loadFloatEEPROM(EEPROM_COULOMB_MAGIC_ADDR, EEPROM_COULOMB_VAL,
-                      EEPROM_COULOMB_DATA_ADDR, v)) {
-    bame.coulomb_count = v;
-    coulombCount       = v;
-  }
+  // Restore the newest CRC-valid record (learned capacity, coulomb counter,
+  // two-anchor state). Blank/garbage EEPROM leaves the core at its init
+  // defaults (compile-time nominal capacity, assumed-full counter).
+  eepromLoad();
+  batteryCapacityAh = bame.capacity_ah;
+  capacityLearned   = bame.capacity_learned;
+  coulombCount      = bame.coulomb_count;
+  lastSavedCoulomb  = bame.coulomb_count;
+  lastSavedAnchor   = bame.last_anchor_kind;
 
   lastMeasure = millis();
   lastEepromSaveMs = millis();

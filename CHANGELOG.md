@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — `v2` branch (plug-and-forget)
+
+### No runtime UI
+
+The device is installed once and left to run, so the whole runtime UI is gone: the settings menu, the Foxeer Key23 keypad + its ADC calibration, and the action button. Capacity starts at the compile-time `BATTERY_CAPACITY_AH` and refines itself; there is no manual "Battery full" or "Reset ALL". The OLED still sleeps/wakes on electrical activity. Frees ~9 % of flash.
+
+### EEPROM: wear-leveled ring buffer with CRC
+
+The fixed-address, magic-byte saves (one cell rewritten every 5 min → ~1-year wear, and a reset mid-write could leave a torn value that still passed the magic check) are replaced by a **32-slot ring buffer**. One record — coulomb counter, learned capacity, and the two-anchor state — rotates across the slots, each stamped with a sequence number and a CRC8. On boot the newest CRC-valid slot wins; a torn write fails the CRC and the previous slot is used. Wear is spread ~32× (decades), the periodic write is skipped when nothing moved (an idle parked van doesn't burn the ring), and the two-anchor measurement now survives a reset. Ring-buffer logic validated by a host test (roundtrip, wraparound, torn-write fallback, blank-EEPROM defaults).
+
 ## v2.4
 
 ### Bidirectional, aging-aware capacity learning (BUS)
