@@ -75,6 +75,16 @@
 #define CAVG_EWMA_ALPHA        (MEASURE_INTERVAL_MS / 1000.0f / CAVG_EWMA_TAU_S)
 #define EEPROM_SAVE_INTERVAL_MS 300000UL  // save coulombCount every 5 min
 
+// --- Screen power management ---
+// The OLED (SSD1306, no backlight — pixels self-emit) sleeps via a software
+// command after SCREEN_TIMEOUT_MS with no electrical activity. There is no
+// wake button in the install, so the wake source is the measurement itself:
+// any current past the dead-band (either sign) or any voltage step re-arms
+// the timer / wakes the panel. Power-on arms it too → 2 min on after boot.
+#define SCREEN_TIMEOUT_MS  120000UL  // sleep after 2 min with no activity
+#define SCREEN_WAKE_I      0.05f     // |current| (A) past the dead-band = activity
+#define SCREEN_WAKE_DV     0.05f     // voltage step (V) between ticks = activity
+
 // --- EEPROM layout ---
 #define EEPROM_KEYPAD_MAGIC_ADDR 0
 #define EEPROM_KEYPAD_VAL        0xCA
@@ -239,6 +249,44 @@ void declareBatteryFull(unsigned long now) {
   saveLearnedEEPROM();
 }
 
+// ===========================================================================
+// Screen power management (no wake button in the install → activity-driven)
+// ===========================================================================
+static bool          screenOn       = true;
+static unsigned long lastActivityMs = 0;
+static float         prevVoltage    = 0;
+
+// Wake the panel (if asleep) and extend the on-time by SCREEN_TIMEOUT_MS.
+static void screenWake() {
+  lastActivityMs = millis();
+  if (!screenOn) {
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    screenOn = true;
+    updateDisplay();            // repaint now, don't wait for the 500 ms tick
+    lastDisplay = millis();
+  }
+}
+
+static void screenSleep() {
+  if (screenOn) {
+    display.ssd1306_command(SSD1306_DISPLAYOFF);  // ~10 µA, panel off
+    screenOn = false;
+  }
+}
+
+// Called once per measurement tick: decide wake vs sleep from the fresh
+// voltage/current globals. `now` is the measurement's millis timestamp.
+static void updateScreenPower(unsigned long now) {
+  bool active = (fabsf(current) > SCREEN_WAKE_I)
+             || (fabsf(voltage - prevVoltage) > SCREEN_WAKE_DV);
+  prevVoltage = voltage;
+  if (active) {
+    screenWake();
+  } else if (screenOn && (now - lastActivityMs) >= SCREEN_TIMEOUT_MS) {
+    screenSleep();
+  }
+}
+
 static void updateMeasurements() {
   float v_raw = ina.getBusVoltage();
   float i_raw = ina.getCurrent();
@@ -276,6 +324,8 @@ static void updateMeasurements() {
     saveCoulombEEPROM();
     lastEepromSaveMs = now;
   }
+
+  updateScreenPower(now);
 }
 
 // ===========================================================================
@@ -328,6 +378,7 @@ void setup() {
 
   lastMeasure = millis();
   lastEepromSaveMs = millis();
+  lastActivityMs = millis();   // power-on counts as activity → screen on for 2 min
 }
 
 void loop() {
@@ -336,12 +387,16 @@ void loop() {
     updateMeasurements();
   }
   if ((now - lastDisplay) >= DISPLAY_INTERVAL_MS) {
-    updateDisplay();
+    if (screenOn) updateDisplay();   // skip the I2C repaint while the panel sleeps
     lastDisplay = now;
   }
 
+  // Any button press is activity too (no button wired yet, but future-proof).
+  Button btn = readButton();
+  if (btn != BTN_NONE) screenWake();
+
   // Long-press CENTER (≥ 500 ms) opens the settings menu.
-  if (readButton() == BTN_CENTER) {
+  if (btn == BTN_CENTER) {
     unsigned long pressStart = millis();
     while (readButton() == BTN_CENTER) {
       if (millis() - pressStart >= 500) {

@@ -105,18 +105,26 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
                  + (1.0f - cfg->cavg_ewma_alpha) * s->c_avg;
     }
 
-    // --- First-tick init (battery_present is also a "first valid reading"
-    //     flag in prod; it never transitions back to false because BAME
-    //     loses power before it could observe a real disconnection). ---
-    if (!s->battery_present) {
+    // --- Battery presence + first-sight init ---
+    // Presence tracks a plausible bus voltage. In prod BAME is powered by the
+    // battery itself, so this stays true the whole time it runs (a BMS cutoff
+    // removes power and reboots — it can't be observed as V→0 live). On the
+    // bench, where the MCU is powered separately and nothing is on the shunt,
+    // it correctly reads "no battery" so the splash shows.
+    // MIN_BATTERY_V = 1.0 V — any real pack sits far above this even when flat.
+    bool present = voltage_raw >= 1.0f;
+    if (present && !s->battery_present) {
+        // First sight of a real battery: seed the slow average and sanity-check
+        // the restored counter. Only reset it when it's implausible — a normal
+        // reconnect keeps the running count instead of snapping back to full.
         float cap_as = bame_capacity_as(s);
         if (s->coulomb_count <= 0.0f || s->coulomb_count > cap_as * 1.10f) {
             s->coulomb_count = cap_as;
             s->soc_uncertain = true;
         }
-        s->battery_present = true;
-        s->v_slow_avg      = voltage_raw;
+        s->v_slow_avg = voltage_raw;
     }
+    s->battery_present = present;
 
     // --- External-charge detection (LOAD mode only). Freezes integration
     //     while the charger is holding the battery at top OCV. Symmetric

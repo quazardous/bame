@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.3
+
+### No-battery detection is now voltage-gated
+
+`battery_present` used to latch true on the first tick regardless of voltage — correct in prod (BaMe is powered by the battery it measures, so if it runs a battery is present) but wrong on the bench, where the MCU is powered separately and nothing is on the shunt: the "No Battery" splash never showed. Presence now tracks the bus voltage (≥ 1 V). In prod it stays true for the whole run exactly as before; a reconnect keeps the running coulomb count instead of snapping back to full.
+
+### Screen auto-off (activity-driven, no wake button)
+
+The OLED now sleeps (`SSD1306_DISPLAYOFF`, ~10 µA — the panel is self-emissive, there is no backlight to switch) after 2 minutes with no electrical activity. Since the install has no wake button, the wake source is the measurement itself: any current past the dead-band (charge **or** discharge) or any voltage step > 50 mV wakes the panel immediately and re-arms the 2-minute timer. Power-on arms it too, so the screen stays on for 2 minutes after boot. Full off, no dim; the sleeping panel skips its I²C repaint, and a future action button also wakes it.
+
 ## v2.2
 
 ### Firmware version on the no-battery splash
