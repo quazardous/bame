@@ -1,5 +1,9 @@
 // Shared state for BaMe v2 (pure coulomb counting, no voltage SOC).
 // Globals are defined in main.cpp; modules read them via these externs.
+//
+// Plug-and-forget build: no physical button, no settings menu. Capacity is
+// the compile-time nominal until a cycle learns the real value; everything
+// else is automatic.
 #pragma once
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
@@ -14,13 +18,9 @@ extern Adafruit_SSD1306 display;
 extern BameGFX gfx;
 extern INA226 ina;
 
-// --- Cell count (compile-time, BAME_CELLS in platformio.ini) ---
-extern const uint8_t cellCount;
-
-// --- Battery capacity ---
-extern float batteryCapacityNom;   // user "sticker value", reset target
-extern float batteryCapacityAh;    // learned (or nom if not yet learned)
-extern bool  capacityLearned;      // true once a cycle's amplitude exceeded nominal
+// --- Battery capacity (learned, or compile-time nominal until learned) ---
+extern float batteryCapacityAh;
+extern bool  capacityLearned;      // true once a cycle has measured the capacity
 
 // --- Live measurements ---
 extern float voltage;
@@ -33,35 +33,19 @@ extern bool  cAvgInit;
 // --- SOC integrator (single source of truth) ---
 extern float coulombCount;
 extern bool  socUncertain;
-extern bool  chargingExternal;  // LOAD-mode: charger detected, integration frozen         // LOAD mode: true after invisible partial charge
+extern bool  chargingExternal;     // LOAD-mode: charger detected, integration frozen
 
-// --- Battery presence + cycle bookkeeping ---
+// --- Battery presence ---
 extern bool  batteryPresent;
-extern float coulombsAtLastFull;   // coulombCount value at the last full event
-extern unsigned long sinceLastFullMs;
 
 // --- Loop pacing ---
 extern unsigned long lastMeasure;
 extern unsigned long lastDisplay;
 
-// --- Buttons ---
-enum Button { BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_CENTER };
-Button readButton();
-Button readButtonDebounced();
-void   waitButtonRelease();
-
-// --- EEPROM helpers (defined in main.cpp) ---
-void saveNomEEPROM();
-void saveLearnedEEPROM();
-void saveCoulombEEPROM();
-void resetAllEEPROM();
-
-// --- Capacity / event helpers (defined in main.cpp) ---
+// --- Capacity / SOC helpers ---
 inline float capacityAs() { return batteryCapacityAh * 3600.0f; }
 inline float socPercent() {
   float as = capacityAs();
   if (as <= 0) return 0;
   return constrain(coulombCount / as * 100.0f, 0.0f, 100.0f);
 }
-void setCapacityNom(float ah);
-void declareBatteryFull(unsigned long now);

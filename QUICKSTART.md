@@ -91,24 +91,23 @@ Available variants (run `make list-envs`):
 - `prod-load-4s`  — production board, 12 V LOAD
 - `prod-bus-8s`   — production board, 24 V BUS
 
-## 5. First boot + settings menu
+## 5. First boot
 
-Long-press CENTER to open the settings menu. Items:
+Plug-and-forget: there is no button and no menu. Everything is set at build
+time or learned automatically.
 
-- **Capacity (Ah)** — sticker value of your battery. Used as the starting
-  reference; when a discharge cycle delivers more Ah than this, the learned
-  capacity rises to match (the `*` next to the capacity display goes away
-  at that point).
-- **Battery full** — manual "SOC = 100%" declaration. Use after a charge
-  that didn't trigger the auto-detect (= the charging icon didn't appear),
-  or to clear a `?` next to the Ah reading.
-- **Reset ALL** — wipes EEPROM (capacity, coulomb count, keypad
-  calibration) and reboots.
+Set at build via `platformio.ini`:
 
-Compile-time (set at build via `platformio.ini`, not in the menu):
-
+- **Capacity** → `BATTERY_CAPACITY_AH` — the sticker value, used as the starting
+  reference until a real cycle measures the capacity (`*` next to it means
+  "not yet measured"). On BUS installs it then tracks both up and down as the
+  pack ages; on LOAD it only ever rises.
 - **Cell count** → `BAME_CELLS`
 - **Wiring** → `BAME_WIRING_BUS` (1 for BUS, 0 for LOAD)
+
+After flashing, wire it in and leave it. The "battery full" reset and capacity
+learning are automatic; the OLED sleeps after 2 min and wakes on any current
+or voltage change.
 
 ## 6. Add your own env (custom cell count etc.)
 
@@ -139,9 +138,8 @@ re-implementation to keep in sync.
 ## 8. What if something goes wrong
 
 - `?` next to the Ah reading → SOC drifted from reality (e.g. invisible
-  charge in LOAD mode). Do a complete charge until the charging icon
-  appears and sticks, or declare "Battery full" manually. Both clear the
-  `?`.
+  charge in LOAD mode). Do a complete charge to full: the next auto-detected
+  "battery full" event clears the `?` (there is no manual override).
 - `*` next to the capacity at rest → no cycle measured yet. Run one full
   charge → full discharge cycle and it'll disappear.
 - Icon doesn't show when the charger is on (LOAD mode) → voltage needs to

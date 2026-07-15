@@ -6,8 +6,8 @@ Generates PNG screenshots that replicate the firmware display output.
 Targets the PROD build (no dev-only countdown, no cal counter).
 Uses the Adafruit 5x7 font bitmap for pixel-accurate rendering.
 
-Source of truth: src/main.cpp updateDisplay() at line 1045, settingsMenu()
-at line 576. Per-element line references are in the code below.
+Source of truth: updateDisplay() in src/display.cpp. Plug-and-forget build —
+main screens only, no settings menu.
 
 Usage:
     python sim/render_screens.py [--scale 6] [--outdir docs/screenshots]
@@ -223,25 +223,6 @@ def draw_gauge(d, percent, label=None):
     d.text(x, 0, text, size=2, inverse=True)
 
 
-def draw_title(d, title):
-    title = title.upper()
-    tw = len(title) * 6
-    x = (W - tw) // 2
-    d.text(x, 4, title)
-
-
-def draw_menu_item(d, row, prefix, label, value="", selected=False, editing=False):
-    y = BLUE_Y + row * 8
-    if selected:
-        d.fill_rect(0, y, W, 8)
-    inv = selected
-    d.text(0, y, f"{prefix} {label}", inverse=inv)
-    if value:
-        val = f"[{value}]" if editing else value
-        vx = W - len(val) * 6
-        d.text(vx, y, val, inverse=inv)
-
-
 def draw_charging_battery(d, x, y, full=False):
     # Mirror BameGFX::drawChargingBattery
     d.rect(x, y, 16, 10)
@@ -328,42 +309,11 @@ def screen_no_battery(d):
     d.text_right(W, H - 8, f"v{BAME_VERSION}")
 
 
-# Settings menu (prod build) — src/main.cpp:576 settingsMenu().
-# Items: Capacity, Cells, V min, V max, Eco mode, Reset ALL, Info V (last, read-only).
-# ITEM_INFO_V is an inline row drawn at src/main.cpp:595-612 (not a drawMenuItem).
-def _draw_info_row(d, row, voltage, soc_pct, selected=False):
-    y = BLUE_Y + row * 8
-    if selected:
-        d.fill_rect(0, y, W, 8)
-    d.text(0, y, f"{voltage:.2f}V {int(soc_pct)}%", inverse=selected)
-
-
-# v2 menu (src/menu.cpp): Capacity, Battery full, Reset ALL, Info V (read-only)
-def screen_menu(d):
-    d.clear()
-    draw_title(d, f"BaMe v{BAME_VERSION}")
-    draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
-    draw_menu_item(d, 1, ' ', 'Battery full')
-    draw_menu_item(d, 2, ' ', 'Reset ALL')
-    _draw_info_row(d, 3, voltage=13.28, soc_pct=64)
-
-
-def screen_menu_edit(d):
-    d.clear()
-    draw_title(d, f"BaMe v{BAME_VERSION}")
-    draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
-    draw_menu_item(d, 1, ' ', 'Battery full')
-    draw_menu_item(d, 2, ' ', 'Reset ALL')
-    _draw_info_row(d, 3, voltage=13.28, soc_pct=64)
-
-
 SCREENS = {
     'main_discharge': screen_main_discharge,
     'main_charge': screen_main_charge,
     'main_rest': screen_main_rest,
     'no_battery': screen_no_battery,
-    'menu': screen_menu,
-    'menu_edit': screen_menu_edit,
 }
 
 

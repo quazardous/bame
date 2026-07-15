@@ -114,7 +114,7 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
                        float voltage_raw, float current_raw,
                        float dt_s, uint32_t now_ms);
 
-// Declare the battery full (manual menu action or external event).
+// Declare the battery full (auto FULL event; no manual trigger in this build).
 // Takes cfg so the amplitude-max learning step can clamp to cap_min/cap_max.
 void bame_declare_full(bame_state_t* s, const bame_config_t* cfg,
                        uint32_t now_ms);

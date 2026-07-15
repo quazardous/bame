@@ -7,8 +7,8 @@
 | MCU | ATmega328PB (prod) or Arduino Nano (proto) | 16MHz, 32KB flash, 2KB RAM |
 | Current/voltage sensor | INA226 (I2C 0x40) | 2.5mOhm shunt, 30A max |
 | Display | SSD1306 OLED 128x64 bicolor (I2C 0x3C) | Yellow (top 16px) + Blue (bottom 48px) |
-| Keypad | Foxeer Key23 | 5-button analog on A3 with 10K pullup |
-| Action button | Momentary NO pushbutton | Pin D2, pulled to GND, used for wake-up (INT0) |
+
+Plug-and-forget: no keypad or button is fitted — the device has no runtime UI.
 
 ## Wiring diagram
 
@@ -46,11 +46,6 @@
                            |  A4 = SDA |---+--- SSD1306 OLED (0x3C)
                            |  A5 = SCL |---+    (shared I2C bus)
                            |           |
-                           |  A3 ------|--> Foxeer Key23 (analog)
-                           |           |      + 10K pullup to VCC
-                           |           |
-                           |  D2 ------|--> Action button (NO to GND)
-                           |           |      (internal pullup)
                            +-----------+
 ```
 
@@ -60,8 +55,6 @@
 |---------|-------------|-------|
 | A4 (SDA) | INA226 SDA + OLED SDA | Shared I2C bus |
 | A5 (SCL) | INA226 SCL + OLED SCL | Shared I2C bus |
-| A3 | Foxeer Key23 signal | 10K pullup to VCC |
-| D2 | Action button | NO to GND, INT0 wake-up |
 | 5V | INA226 VCC + OLED VCC | From regulator |
 | GND | All GND | Common ground |
 
@@ -74,26 +67,9 @@ The INA226 measures battery voltage and current through a shunt resistor.
 - **IN+ / IN-**: across the shunt resistor in the battery negative path
 - Current flows: Battery(-) → IN+ → SHUNT → IN- → Load/GND
 
-### Keypad (Foxeer Key23)
-
-Analog resistor ladder on pin A3. Each button produces a different ADC value. Calibrated at boot by holding a button for 5 seconds.
-
-Default ADC values (with 10K pullup):
-- CENTER: 838
-- UP: 616
-- DOWN: 1
-- LEFT: 748
-- RIGHT: 416
-
-### Action button
-
-Simple NO pushbutton between D2 and GND. Internal pullup enabled. Used for:
-- Wake from deep sleep (INT0 interrupt)
-- Center button alternative
-
 ## Power
 
-The device is powered from the monitored battery. In deep sleep (eco mode), the MCU draws ~5uA. The OLED and INA226 are powered down. Periodic wake-ups (5min to 1h) measure voltage to track battery state.
+The device is powered from the monitored battery and runs continuously (always-on coulomb counting — it can't integrate while asleep). The MCU and INA226 stay awake; only the OLED sleeps (`SSD1306_DISPLAYOFF`, ~10 µA) after 2 minutes with no electrical activity, and wakes on any current or voltage change. A BMS cutoff removes power entirely, so BaMe reboots rather than observing it.
 
 ## Production board
 

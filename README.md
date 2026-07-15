@@ -12,7 +12,7 @@ BaMe watches current through the shunt, integrates it, and shows you a gauge, re
 
 - **Pure coulomb counting** — charge in, charge out, tracked continuously. No voltage-SOC trick on the flat LFP curve.
 - **Capacity learned from real cycles** — the deepest discharge since the last "battery full" is checked at the next full event; if the cycle delivered more than the current capacity estimate, the estimate rises to match. Raise-only, so BaMe learns "this pack is at least this big" and never walks the estimate back on a shallow cycle.
-- **Auto-detect "battery full"** — voltage at top OCV with low current, sustained, resets the SOC to 100%. You can also declare it manually from the menu.
+- **Auto-detect "battery full"** — voltage at top OCV with low current, sustained, resets the SOC to 100%.
 - **Auto-detect "charger attached"** (LOAD install) — voltage kicks >0.5 V on plug in, drops >0.5 V on unplug. Hysteresis filters the LFP rebond.
 - **Smoothed watts & autonomy** — EWMA on the current so a cycling fridge doesn't make the display jump.
 - **Configurable at build time** — cell count, wiring topology, voltage window. See `platformio.ini`.
@@ -34,14 +34,6 @@ BaMe watches current through the shunt, integrates it, and shows you a gauge, re
 ### No battery
 
 ![No battery](docs/screenshots/no_battery.png)
-
-### Settings menu
-
-![Menu](docs/screenshots/menu.png)
-
-### Editing a value
-
-![Editing](docs/screenshots/menu_edit.png)
 
 ## How it works
 
@@ -82,20 +74,11 @@ Each env name encodes hardware × wiring × cell count (e.g. `nano-load-4s` = Ar
 
 ## Controls
 
-| Action | Effect |
-|--------|--------|
-| Hold CENTER 0.5 s | Open settings menu |
-| In menu: UP / DOWN | Navigate / increment / decrement |
-| In menu: CENTER | Enter edit / confirm action |
-| In menu: LEFT | Cancel edit / exit menu |
-| Hold any button at boot 5 s | Keypad re-calibration |
-
-## Settings menu
-
-- **Capacity** — sticker value of your battery (Ah). Used as the starting reference until a cycle measures the real capacity.
-- **Battery full** — manual declaration that the battery is at 100%. Use after a charge that didn't trigger the auto-detect.
-- **Reset ALL** — wipes EEPROM (capacity, coulomb count, keypad) and reboots.
-- Last row — voltage + SOC% read-only, useful as a quick info row.
+None. BaMe is plug-and-forget: no buttons, no menu. It's installed once and left
+to run. Capacity starts at the compile-time value (`BATTERY_CAPACITY_AH` /
+`BAME_CELLS` in `platformio.ini`) and refines itself from real cycles — nothing
+to configure at runtime. The OLED sleeps after 2 min of no electrical activity
+and wakes on any current or voltage change (see the display behaviour above).
 
 ## License
 
