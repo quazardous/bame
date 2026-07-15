@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.2
+
+### Firmware version on the no-battery splash
+
+When no battery is detected the "No Battery" text blinks as before, but the firmware version now shows fixed (non-blinking) in a small font at the bottom-right corner, so a glance at an idle unit tells you what it's running.
+
+### Single source of version
+
+`BAME_VERSION` now lives only in `src/bame_state.h`. Removed the stale duplicate in `menu.cpp` (which still read `2.0-wip`, so the settings-menu title disagreed with the rest of the firmware) and the local copy in `main.cpp`. The splash, the serial banner and the menu title now read the same constant. `sim/render_screens.py` mirrors it, and the menu mockups use it instead of a hardcoded string.
+
+### Reliable USBasp flashing on the ATmega328PB
+
+The prod envs drove the USBasp ISP clock at `-B 4` (~187 kHz), which produced flash verification mismatches on the ATmega328PB. Lowered to `-B 8` (~93 kHz) — `make upload ENV=prod-*` now flashes and verifies cleanly.
+
 ## v2.1
 
 ### Amplitude-max capacity learning

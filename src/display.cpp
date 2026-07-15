@@ -19,6 +19,14 @@ void updateDisplay() {
     display.setTextSize(2);
     display.setCursor(4, BLUE_Y + 12);
     if ((millis() / 500) % 2) display.print(F("No Battery"));
+
+    // Firmware version: fixed (non-blinking), small font, bottom-right.
+    display.setTextSize(1);
+    int16_t bx, by; uint16_t bw, bh;
+    display.getTextBounds(F("v" BAME_VERSION), 0, 0, &bx, &by, &bw, &bh);
+    display.setCursor(SCREEN_W - bw, SCREEN_H - 8);
+    display.print(F("v" BAME_VERSION));
+
     display.display();
     return;
   }

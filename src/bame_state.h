@@ -6,6 +6,9 @@
 #include <INA226.h>
 #include "BameGFX.h"
 
+// --- Firmware version (serial banner + no-battery splash) ---
+#define BAME_VERSION "2.2"
+
 // --- Hardware objects ---
 extern Adafruit_SSD1306 display;
 extern BameGFX gfx;

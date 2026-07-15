@@ -3,7 +3,7 @@
 #include "menu.h"
 #include "bame_state.h"
 
-#define BAME_VERSION   "2.0-wip"
+// BAME_VERSION comes from bame_state.h (single source of truth).
 #define CAPACITY_MIN   1.0f
 #define CAPACITY_MAX   500.0f
 

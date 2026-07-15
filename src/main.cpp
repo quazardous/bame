@@ -24,7 +24,7 @@
 #include "display.h"
 #include "menu.h"
 
-#define BAME_VERSION "2.1"
+// BAME_VERSION is defined in bame_state.h (shared with display.cpp).
 
 #ifndef BAME_DEBUG
   #define BAME_DEBUG 0

@@ -22,6 +22,9 @@ W, H = 128, 64
 YELLOW_H = 16
 BLUE_Y = 16
 
+# Firmware version (match BAME_VERSION in src/bame_state.h)
+BAME_VERSION = "2.2"
+
 # Colors for PNG
 COL_BG = (0, 0, 0)
 COL_YELLOW = (255, 220, 0)
@@ -321,6 +324,8 @@ def screen_no_battery(d):
     d.clear()
     draw_gauge(d, 0)
     d.text(4, BLUE_Y + 12, "No Battery", size=2)
+    # Firmware version: fixed, small font, bottom-right (matches display.cpp).
+    d.text_right(W, H - 8, f"v{BAME_VERSION}")
 
 
 # Settings menu (prod build) — src/main.cpp:576 settingsMenu().
@@ -336,7 +341,7 @@ def _draw_info_row(d, row, voltage, soc_pct, selected=False):
 # v2 menu (src/menu.cpp): Capacity, Battery full, Reset ALL, Info V (read-only)
 def screen_menu(d):
     d.clear()
-    draw_title(d, "BaMe v2.0")
+    draw_title(d, f"BaMe v{BAME_VERSION}")
     draw_menu_item(d, 0, ' ', 'Capacity', '80Ah', selected=True)
     draw_menu_item(d, 1, ' ', 'Battery full')
     draw_menu_item(d, 2, ' ', 'Reset ALL')
@@ -345,7 +350,7 @@ def screen_menu(d):
 
 def screen_menu_edit(d):
     d.clear()
-    draw_title(d, "BaMe v2.0")
+    draw_title(d, f"BaMe v{BAME_VERSION}")
     draw_menu_item(d, 0, ' ', 'Capacity', '85Ah', selected=True, editing=True)
     draw_menu_item(d, 1, ' ', 'Battery full')
     draw_menu_item(d, 2, ' ', 'Reset ALL')
