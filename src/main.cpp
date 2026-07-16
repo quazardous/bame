@@ -111,6 +111,7 @@ float current       = 0;
 float power         = 0;
 float currentOffset = 0;
 float cAvg          = 0;
+float cAvgSlow      = 0;
 bool  cAvgInit      = false;
 
 float coulombCount  = 0;
@@ -247,6 +248,7 @@ static void updateMeasurements() {
   current         = bame.current;
   currentOffset   = bame.current_offset;
   cAvg            = bame.c_avg;
+  cAvgSlow        = bame.c_avg_slow;
   cAvgInit        = bame.c_avg_init;
   coulombCount    = bame.coulomb_count;
   socUncertain    = bame.soc_uncertain;

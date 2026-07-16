@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Firmware version (serial banner + no-battery splash) ---
-#define BAME_VERSION "2.8"
+#define BAME_VERSION "2.9"
 
 // --- Hardware objects ---
 extern Adafruit_SSD1306 display;
@@ -27,7 +27,8 @@ extern float voltage;
 extern float current;              // INA reading minus offset, dead-band applied
 extern float power;                // INA-reported power
 extern float currentOffset;
-extern float cAvg;                 // EWMA-smoothed current (display only)
+extern float cAvg;                 // EWMA-smoothed current, τ ≈ 30 s (watts)
+extern float cAvgSlow;             // EWMA-smoothed current, τ ≈ 1 h  (autonomy)
 extern bool  cAvgInit;
 
 // --- SOC integrator (single source of truth) ---

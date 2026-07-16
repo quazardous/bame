@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9
+
+### Autonomy smoothed over ~1 hour
+
+The autonomy estimate (`HH:MM`) rode the 30-second current average, so an intermittent load swung it constantly: with a fridge, every compressor start collapsed the estimate and every stop flipped the line to the at-rest capacity. It now uses a **second, slow current average** (EWMA τ ≈ 1 h, `cavg_slow_alpha`), which averages the load to its real **duty cycle** — the estimate stays steady and the line stops flip-flopping. Watts keep the responsive 30 s average and the raw current readout is unchanged.
+
+Trade-off: after genuinely stopping every load it takes ~1 h for the line to settle back to the at-rest capacity, and a big new load takes ~1 h to be fully reflected — which is the point for cycling loads.
+
 ## v2.8
 
 ### Blinking provisional-capacity hint

@@ -60,6 +60,8 @@ void bame_config_defaults(bame_config_t* cfg) {
     cfg->ext_rearm_ms     = 15000u;
     cfg->v_knee_per_cell  = 3.05f;
     cfg->cap_ewma_alpha   = 0.50f;
+    // Autonomy EWMA τ ≈ 1 h at 100 ms tick → alpha = 0.1/3600 ≈ 2.78e-5
+    cfg->cavg_slow_alpha  = 0.1f / 3600.0f;
 }
 
 
@@ -79,6 +81,7 @@ void bame_init(bame_state_t* s, uint8_t cells, bool wiring_bus,
     s->v_slow_avg         = 0.0f;
     s->current_offset     = 0.0f;
     s->c_avg              = 0.0f;
+    s->c_avg_slow         = 0.0f;
     s->c_avg_init         = false;
     s->voltage            = 0.0f;
     s->current            = 0.0f;
@@ -145,12 +148,19 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
     s->current = c;
 
     // --- EWMA on smoothed current (display only, not gated on rest) ---
+    // c_avg      (τ ≈ 30 s) drives the watts readout — stays responsive.
+    // c_avg_slow (τ ≈ 1 h)  drives the autonomy — averages an intermittent
+    //            load (fridge compressor) to its real duty cycle so the
+    //            estimate doesn't swing on every on/off.
     if (!s->c_avg_init) {
         s->c_avg      = c;
+        s->c_avg_slow = c;
         s->c_avg_init = true;
     } else {
         s->c_avg = cfg->cavg_ewma_alpha * c
                  + (1.0f - cfg->cavg_ewma_alpha) * s->c_avg;
+        s->c_avg_slow = cfg->cavg_slow_alpha * c
+                      + (1.0f - cfg->cavg_slow_alpha) * s->c_avg_slow;
     }
 
     // --- Battery presence + first-sight init ---

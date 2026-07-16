@@ -39,6 +39,10 @@ typedef struct {
     // BUS-only bidirectional (aging-aware) capacity learning:
     float    v_knee_per_cell;    // 3.05  — rest V/cell at/below this = KNEE anchor
     float    cap_ewma_alpha;     // 0.50  — capacity EWMA weight per discharge measure
+    // Slow current average driving the autonomy estimate. τ ≈ 1 h so an
+    // intermittent load (fridge compressor cycling) averages to its real duty
+    // cycle instead of swinging the estimate on every on/off.
+    float    cavg_slow_alpha;    // 0.1/3600 — EWMA α at the 100 ms tick
 } bame_config_t;
 
 
@@ -73,7 +77,8 @@ typedef struct {
 
     // --- Smoothing / auto-zero ---
     float current_offset;
-    float c_avg;                  // EWMA-smoothed current
+    float c_avg;                  // EWMA-smoothed current (τ ≈ 30 s) — watts
+    float c_avg_slow;             // EWMA-smoothed current (τ ≈ 1 h)  — autonomy
     bool  c_avg_init;
 
     // --- Last-tick derived values (mirrored for display / test harness) ---

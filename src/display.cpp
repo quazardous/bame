@@ -81,8 +81,12 @@ void updateDisplay() {
   }
 
   // Line 3: HH:MM remaining (active) or capacity (at rest)
+  // Driven by the SLOW current average (τ ≈ 1 h): an intermittent load (fridge
+  // compressor) then averages to its real duty cycle, so the estimate stays
+  // steady instead of swinging — and the line doesn't flip to "at rest" every
+  // time the compressor stops. Watts keep the responsive 30 s average.
   int16_t ty = BLUE_Y + 37;
-  float iAuto = cAvgInit ? cAvg : current;
+  float iAuto = cAvgInit ? cAvgSlow : current;
   if (iAuto > ACTIVE_CURRENT) {
     float hoursLeft = (coulombCount / 3600.0) / iAuto;
     hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);

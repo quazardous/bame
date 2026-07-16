@@ -49,6 +49,7 @@ class BameConfig(Structure):
         ("ext_rearm_ms",          c_uint32),
         ("v_knee_per_cell",       c_float),
         ("cap_ewma_alpha",        c_float),
+        ("cavg_slow_alpha",       c_float),
     ]
 
 
@@ -68,6 +69,7 @@ class BameState(Structure):
         ("v_slow_avg",               c_float),
         ("current_offset",           c_float),
         ("c_avg",                    c_float),
+        ("c_avg_slow",               c_float),
         ("c_avg_init",               c_bool),
         ("voltage",                  c_float),
         ("current",                  c_float),
