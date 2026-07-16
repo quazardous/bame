@@ -11,9 +11,10 @@ that can move up AND down:
       FULL  — rest, V/cell >= ~3.40  → SOC ~100 %
       KNEE  — rest, V/cell in the bottom steep region (~2.6–3.15) → SOC read
               from the OCV curve (~5–17 %)
-  - Between two opposite anchors, BUS coulomb counting gives the exact Ah
-    moved. Capacity = ΔAh / ΔSOC → an absolute measurement, EWMA-smoothed,
-    that shrinks when the pack ages.
+  - On the DISCHARGE leg (FULL -> KNEE), BUS coulomb counting gives the exact
+    Ah delivered. Capacity = ΔAh / ΔSOC → an absolute measurement, EWMA-
+    smoothed, that shrinks when the pack ages. (The charge leg is not counted —
+    it would overestimate capacity, coulombic efficiency < 1.)
   - Cycles that never rest at the knee (soft usage) produce no measurement,
     so the estimate is never wrongly lowered.
 
@@ -47,7 +48,7 @@ TOP_V_CELL     = 3.375    # rest V/cell above this = FULL anchor region
 KNEE_HI_CELL   = 3.15     # rest V/cell in [KNEE_LO, KNEE_HI] = KNEE anchor region
 KNEE_LO_CELL   = 2.60
 MIN_DSOC       = 0.30     # require >=30 % SOC swing between anchors to trust a measurement
-EWMA_ALPHA     = 0.35     # per-measurement capacity smoothing
+EWMA_ALPHA     = 0.50     # per-measurement capacity smoothing
 
 
 def _deadband(i):
@@ -72,7 +73,11 @@ class TwoAnchorLearner:
 
     def _anchor(self, kind, v_cell):
         soc = soc_from_voltage_percell(v_cell)          # SOC from rest OCV
-        if self.last_kind is not None and self.last_kind != kind:
+        # Measure capacity on the DISCHARGE leg only (FULL -> KNEE): the Ah
+        # actually delivered. The charge leg would overestimate it because not
+        # all charge is retained (coulombic efficiency < 1). The FULL anchor
+        # only re-borders the top / re-syncs SOC.
+        if kind == 'knee' and self.last_kind == 'full':
             dsoc = abs(soc - self.last_soc) / 100.0
             if dsoc > MIN_DSOC:
                 span_ah = abs(self.q - self.last_q) / 3600.0

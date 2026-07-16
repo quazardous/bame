@@ -59,7 +59,7 @@ void bame_config_defaults(bame_config_t* cfg) {
     cfg->v_disconnect_drop = 0.5f;
     cfg->ext_rearm_ms     = 15000u;
     cfg->v_knee_per_cell  = 3.05f;
-    cfg->cap_ewma_alpha   = 0.35f;
+    cfg->cap_ewma_alpha   = 0.50f;
 }
 
 
@@ -269,13 +269,12 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
     if (at_top) {
         if (s->rest_at_top_since_ms == 0u) s->rest_at_top_since_ms = now_ms;
         if (s->full_armed && (now_ms - s->rest_at_top_since_ms) >= cfg->full_rest_ms) {
-            // BUS: close a KNEE→FULL span using the pre-reset coulomb count,
-            // then re-anchor to FULL with the post-reset baseline below.
-            if (s->wiring_bus && s->last_anchor_kind == 2u) {
-                bame__measure(s, cfg, soc_from_v_percell(v_cell));
-            }
             bame_declare_full(s, cfg, now_ms);   // resets coulomb (raise-only if LOAD)
             evt = BAME_EVT_FULL;
+            // BUS: the FULL event only re-anchors the top and re-syncs SOC — it
+            // does NOT measure capacity. Capacity is measured on the DISCHARGE
+            // leg (FULL→KNEE) only; counting charge coulombs would overestimate
+            // it because not all charge is retained (coulombic efficiency < 1).
             if (s->wiring_bus) {
                 s->last_anchor_kind       = 1u;
                 s->soc_at_last_anchor     = soc_from_v_percell(v_cell);

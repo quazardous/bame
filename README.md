@@ -49,7 +49,7 @@ Two topologies, picked at compile time.
 
 BaMe powers itself from the very battery it measures, so a BMS cutoff is a power-loss event it can never witness. Capacity is instead learned from rest-voltage anchors on the steep parts of the LFP curve:
 
-- **BUS** — every current passes the shunt, so the Ah moved between the *full* anchor (top OCV plateau) and the *knee* anchor (bottom of the curve, read at rest) is measured exactly. That Ah over the SOC swing gives an absolute capacity, averaged (EWMA) across cycles — it moves **up and down**, so it tracks a pack that loses capacity as it ages. Cycles that never rest at the knee produce no measurement, so a light-use estimate is never wrongly lowered.
+- **BUS** — every current passes the shunt, so the Ah **delivered on discharge** between the *full* anchor (top OCV plateau) and the *knee* anchor (bottom of the curve, read at rest) is measured exactly. That Ah over the SOC swing gives an absolute capacity, averaged (EWMA) across cycles — it moves **up and down**, so it tracks a pack that loses capacity as it ages. Only the discharge leg is counted: charging back up would overestimate the capacity because not all charge is retained (coulombic efficiency < 100%), so the charge only re-anchors the top and re-syncs SOC. Cycles that never rest at the knee produce no measurement, so a light-use estimate is never wrongly lowered.
 - **LOAD** — the charger bypasses the shunt, so there is no bottom-anchor charge leg to measure. BaMe falls back to raise-only: at each full event it raises the estimate to the deepest discharge seen since the last full, never lowering it.
 
 Until a cycle has measured the capacity, BaMe shows the sticker value with a `*`.

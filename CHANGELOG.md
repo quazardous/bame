@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.7
+
+### Capacity measured on the discharge leg only
+
+The BUS two-anchor learner used to measure on *both* legs — the discharge (FULL→KNEE) and the charge (KNEE→FULL). Counting charge coulombs overestimates capacity: not all charge pushed in is retained (coulombic efficiency < 100%), and over a messy multi-charge path the error accumulates. Capacity is now measured on the **discharge leg only** (the Ah actually delivered); the FULL event just re-anchors the top and re-syncs SOC. With half as many measurements the EWMA weight is raised (`cap_ewma_alpha` 0.35 → 0.50) so tracking stays responsive. Revalidated against the real C core in `sim/aging_proto.py`: an aging 2.0→1.4 Ah pack is tracked to ~4% in the van scenario, and the 80→50 Ah calibration converges in ~4 cycles.
+
 ## v2.6
 
 ### INA226 diagnostic helper
