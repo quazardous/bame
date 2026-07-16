@@ -82,6 +82,7 @@ void bame_init(bame_state_t* s, uint8_t cells, bool wiring_bus,
     s->current_offset     = 0.0f;
     s->c_avg              = 0.0f;
     s->c_avg_slow         = 0.0f;
+    s->c_avg_slow_n       = 0u;
     s->c_avg_init         = false;
     s->voltage            = 0.0f;
     s->current            = 0.0f;
@@ -153,14 +154,21 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
     //            load (fridge compressor) to its real duty cycle so the
     //            estimate doesn't swing on every on/off.
     if (!s->c_avg_init) {
-        s->c_avg      = c;
-        s->c_avg_slow = c;
-        s->c_avg_init = true;
+        s->c_avg        = c;
+        s->c_avg_slow   = c;
+        s->c_avg_slow_n = 1u;
+        s->c_avg_init   = true;
     } else {
         s->c_avg = cfg->cavg_ewma_alpha * c
                  + (1.0f - cfg->cavg_ewma_alpha) * s->c_avg;
-        s->c_avg_slow = cfg->cavg_slow_alpha * c
-                      + (1.0f - cfg->cavg_slow_alpha) * s->c_avg_slow;
+        // Warm-up: α = max(1/n, α_1h). While n is small this is the plain mean
+        // of every sample so far, so the autonomy is usable from the first tick
+        // instead of needing an hour to converge; once 1/n drops below α_1h it
+        // settles into the real 1-hour rolling EWMA.
+        if (s->c_avg_slow_n < 100000u) s->c_avg_slow_n++;
+        float a_slow = 1.0f / (float)s->c_avg_slow_n;
+        if (a_slow < cfg->cavg_slow_alpha) a_slow = cfg->cavg_slow_alpha;
+        s->c_avg_slow = a_slow * c + (1.0f - a_slow) * s->c_avg_slow;
     }
 
     // --- Battery presence + first-sight init ---

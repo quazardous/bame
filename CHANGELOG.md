@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.10
+
+### Autonomy usable from the first second (warm-up)
+
+The 1-hour average introduced in v2.9 was seeded on the first sample, so a boot
+taken while the fridge compressor happened to be running (or stopped) started
+the estimate off at that extreme and took an hour to become representative. The
+slow average now uses a **growing window**: `α = max(1/n, α_1h)`. While `n` is
+small it is the plain mean of every sample seen so far — a usable estimate from
+the very first tick, refining as evidence accumulates — and once `1/n` drops
+below `α_1h` (after ~1 h) it settles into the real 1-hour rolling EWMA.
+
+Verified against the real C core: a 6 A / 2 min on, 4 min off fridge converges
+to exactly **2.00 A**, its true duty-cycled draw, while reporting a sensible
+figure from second one.
+
+
 ## v2.9
 
 ### Autonomy smoothed over ~1 hour

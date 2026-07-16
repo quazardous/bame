@@ -79,6 +79,9 @@ typedef struct {
     float current_offset;
     float c_avg;                  // EWMA-smoothed current (τ ≈ 30 s) — watts
     float c_avg_slow;             // EWMA-smoothed current (τ ≈ 1 h)  — autonomy
+    uint32_t c_avg_slow_n;        // samples so far; drives the warm-up α = 1/n so
+                                  // c_avg_slow is the true mean from the very first
+                                  // tick and only becomes a 1 h EWMA after ~1 h
     bool  c_avg_init;
 
     // --- Last-tick derived values (mirrored for display / test harness) ---

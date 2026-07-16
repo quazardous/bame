@@ -70,6 +70,7 @@ class BameState(Structure):
         ("current_offset",           c_float),
         ("c_avg",                    c_float),
         ("c_avg_slow",               c_float),
+        ("c_avg_slow_n",             c_uint32),
         ("c_avg_init",               c_bool),
         ("voltage",                  c_float),
         ("current",                  c_float),
