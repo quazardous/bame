@@ -11,7 +11,7 @@
 #include "BameGFX.h"
 
 // --- Firmware version (serial banner + no-battery splash) ---
-#define BAME_VERSION "2.7"
+#define BAME_VERSION "2.8"
 
 // --- Hardware objects ---
 extern Adafruit_SSD1306 display;
@@ -34,6 +34,7 @@ extern bool  cAvgInit;
 extern float coulombCount;
 extern bool  socUncertain;
 extern bool  chargingExternal;     // LOAD-mode: charger detected, integration frozen
+extern float deliveredAh;          // peak Ah delivered since last full (provisional hint)
 
 // --- Battery presence ---
 extern bool  batteryPresent;

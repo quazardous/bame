@@ -53,6 +53,14 @@ void updateDisplay() {
     display.setCursor(ahDigits * 12, BLUE_Y + 10);
     display.print('?');
   }
+  // Provisional capacity being measured this cycle: peak Ah delivered so far,
+  // blinking, next to the '?', until a cycle confirms the real capacity. It's a
+  // lower bound ("at least this big") that grows toward the true capacity as the
+  // pack empties — an indication only, the big Ah/gauge are unchanged.
+  if (!capacityLearned && deliveredAh >= 1.0f && (millis() / 500) % 2) {
+    display.setCursor(ahDigits * 12 + (socUncertain ? 8 : 0), BLUE_Y + 10);
+    display.print((int)(deliveredAh + 0.5f));
+  }
   display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
   display.print(F("V"));
 

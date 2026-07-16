@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.7"
+BAME_VERSION = "2.8"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -241,7 +241,7 @@ def draw_trend_arrow(d, x, y, direction):
 # --- Main display: mirrors updateDisplay() in src/display.cpp (v2) ---
 
 def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
-               soc_uncertain=False, capacity_learned=True):
+               soc_uncertain=False, capacity_learned=True, delivered_ah=0):
     d.clear()
     remaining_ah = int(soc * cap_ah / 100)
 
@@ -254,6 +254,11 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     d.text(ah_digits * 12, BLUE_Y + 2, "Ah")
     if soc_uncertain:
         d.text(ah_digits * 12, BLUE_Y + 10, "?")
+    # Provisional capacity measured this cycle (blinks in firmware; shown here
+    # in its visible phase): peak Ah delivered so far, next to the '?'.
+    if not capacity_learned and delivered_ah >= 1:
+        d.text(ah_digits * 12 + (8 if soc_uncertain else 0), BLUE_Y + 10,
+               str(int(delivered_ah + 0.5)))
     d.text(W - 54, BLUE_Y + 2, f"{voltage:.1f}", size=2)
     d.text(W - 6, BLUE_Y + 2, "V")
 
@@ -289,7 +294,10 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
 # --- Screens ---
 
 def screen_main_discharge(d):
-    _draw_main(d, voltage=13.2, current=3.7, soc=64, cap_ah=80)
+    # Capacity not yet confirmed: '?' + blinking provisional measurement (13 Ah
+    # delivered so far) next to the big remaining Ah.
+    _draw_main(d, voltage=13.2, current=3.7, soc=84, cap_ah=80,
+               soc_uncertain=True, capacity_learned=False, delivered_ah=13)
 
 
 def screen_main_charge(d):

@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.8
+
+### Blinking provisional-capacity hint
+
+While the capacity isn't confirmed yet, the main screen now blinks a small number next to the `?` — the **Ah delivered since the last full** (peak this cycle). It's a live lower bound ("at least this big") that grows as the pack empties and converges toward the real capacity when it reaches the bottom, so you get a trustworthy figure during the very first deep discharge instead of only the nominal guess. Indication only: the big remaining-Ah number and the gauge are unchanged, and it disappears once a cycle has measured the real capacity or resets at the next full.
+
 ## v2.7
 
 ### Capacity measured on the discharge leg only

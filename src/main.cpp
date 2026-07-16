@@ -119,6 +119,11 @@ bool  chargingExternal = false;
 
 bool  batteryPresent = false;
 
+// Peak Ah delivered since the last full (or boot) — a live lower bound on the
+// real capacity, shown as a blinking provisional hint until a cycle confirms it.
+float deliveredAh   = 0;
+static float fullRefCoulomb = 0;   // coulomb_count at the last full / boot
+
 unsigned long lastMeasure = 0;
 unsigned long lastDisplay = 0;
 
@@ -250,6 +255,12 @@ static void updateMeasurements() {
   capacityLearned = bame.capacity_learned;
   batteryCapacityAh = bame.capacity_ah;
 
+  // Provisional capacity hint: peak Ah delivered since the last full (or boot).
+  // A live lower bound the display blinks until a cycle confirms the capacity.
+  if (evt == BAME_EVT_FULL) { fullRefCoulomb = bame.coulomb_count; deliveredAh = 0; }
+  float dlv = (fullRefCoulomb - bame.coulomb_count) / 3600.0f;
+  if (dlv > deliveredAh) deliveredAh = dlv;
+
   // Persist to the ring buffer on a FULL (capacity/anchor just changed), or on
   // the periodic tick — but skip the periodic write when nothing meaningful
   // moved, so a van parked idle for weeks doesn't burn the ring for nothing.
@@ -298,6 +309,7 @@ void setup() {
   coulombCount      = bame.coulomb_count;
   lastSavedCoulomb  = bame.coulomb_count;
   lastSavedAnchor   = bame.last_anchor_kind;
+  fullRefCoulomb    = bame.coulomb_count;   // provisional-hint reference
 
   lastMeasure = millis();
   lastEepromSaveMs = millis();
