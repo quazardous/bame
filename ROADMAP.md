@@ -6,9 +6,9 @@ Ideas not yet implemented. No timeline.
 
 BUS learns capacity bidirectionally via a FULL + KNEE anchor pair. In LOAD the charge leg is invisible, but the *discharge* leg (FULL → KNEE) is still measurable — the same two-anchor method could apply on the discharge side alone.
 
-## Long-term drift check
+## Lower the current dead band
 
-After weeks of real-world use, see whether the coulomb integrator drifts meaningfully between "battery full" auto-detects. If it does, tighten the `i_rest` dead band or add a slow auto-zero on the current offset during sustained idle.
+The ±50 mA dead band rejects sensor noise, but it also means anything under 50 mA is never counted — including BaMe's own draw (MCU + INA226 + buck, ~10 mA on the 12 V side, 24/7 ≈ 0.25 Ah/day). The INA226's resolution is far better than 50 mA, so the band could likely drop to ~10-20 mA now that the offset auto-zero no longer eats real loads (v2.13). Worth measuring the actual sensor noise floor first.
 
 ## Non-LFP chemistries
 

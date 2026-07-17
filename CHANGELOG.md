@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.13
+
+### Two integrator bugs fixed: the counter was silently wrong
+
+Chasing the ROADMAP's vague "long-term drift check" turned up two real,
+measurable bugs that made the coulomb counter under-count discharge. Both are
+fixed; the real C core now counts **0.00 % error** on every load tested
+(0.1 / 0.2 / 0.45 / 1 / 2 / 4 A, and a duty-cycled fridge over 24 h).
+
+**1. Float32 quantisation.** `coulomb_count` holds ~288000 (80 Ah in A·s), where
+a float32 ULP is 0.03125 — but a 100 ms tick at 0.45 A only subtracts 0.045, just
+1.44 ULP, so rounding dragged each step back to 0.03125 and **31 % of the charge
+was lost** (measured). At 1–2 A the loss was 6.2 %; below ~0.156 A the step fell
+under ½ ULP and the counter **stopped moving entirely**. The error is not even a
+consistent bias — on a 200 Ah pack at 0.45 A it flipped to **+38.9 %**. Fix: a
+new `coulomb_frac` accumulator stays within ±1 A·s (full precision) and only
+hands whole A·s to the big counter.
+
+**2. The offset auto-zero ate real loads.** It is meant to track the INA226's
+thermal offset drift (a few mA, very slow), but it fired on `|I| < i_rest`
+(0.3 A) with τ ≈ 10 s — so **any steady load under 0.3 A was absorbed into
+`current_offset` within ~30 s and became invisible**: a 0.20 A standby measured
+as 0.000 Ah/h, several Ah/day vanishing with the SOC unchanged. Worse, it never
+did its actual job: once the reading is dead-banded, `raw == offset` and the
+update is a no-op — so it only ever acted in the 0.05–0.3 A window, exactly where
+real loads live. Fix: only auto-zero when the reading is already inside the dead
+band (nothing drawing), with τ ≈ 1 h (`offset_zero_alpha`) — which is what a
+thermal drift calls for. It now correctly learns a +4 mA offset.
+
+Prototyped and measured in `sim/integrator_proto.py` (forces float32 through
+`struct` so Python reproduces the AVR arithmetic), then verified against the real
+C core. No regression: BUS/LOAD capacity learning unchanged, van aging tracking
+3.9 % → 3.4 %.
+
+
 ## v2.12
 
 ### Current and voltage swapped on the right

@@ -43,6 +43,10 @@ typedef struct {
     // intermittent load (fridge compressor cycling) averages to its real duty
     // cycle instead of swinging the estimate on every on/off.
     float    cavg_slow_alpha;    // 0.1/3600 — EWMA α at the 100 ms tick
+    // Current-offset auto-zero. Only runs when the reading is already inside the
+    // dead band (so we're confident nothing is drawing); τ ≈ 1 h, which is what
+    // the INA226's thermal offset drift (a few mA) actually calls for.
+    float    offset_zero_alpha;  // 0.1/3600 — EWMA α at the 100 ms tick
 } bame_config_t;
 
 
@@ -57,7 +61,14 @@ typedef struct {
     bool  capacity_learned;      // true once a cycle's amplitude exceeded nominal
 
     // --- SOC integrator (single source of truth) ---
-    float coulomb_count;          // A·s
+    float coulomb_count;          // A·s — whole units only (see coulomb_frac)
+    float coulomb_frac;           // sub-A·s remainder, kept near 0 so the tiny
+                                  // per-tick step keeps full float precision:
+                                  // coulomb_count sits around 288000 where a
+                                  // float32 ULP is 0.03125, so a 0.045 step
+                                  // (0.45 A × 100 ms) would round away ~31 % of
+                                  // the charge if added straight in. Whole A·s
+                                  // are transferred out of here into the counter.
     bool  soc_uncertain;
 
     // --- Battery presence (set true on first valid tick; never goes false in

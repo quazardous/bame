@@ -62,6 +62,9 @@ void bame_config_defaults(bame_config_t* cfg) {
     cfg->cap_ewma_alpha   = 0.50f;
     // Autonomy EWMA τ ≈ 1 h at 100 ms tick → alpha = 0.1/3600 ≈ 2.78e-5
     cfg->cavg_slow_alpha  = 0.1f / 3600.0f;
+    // Offset auto-zero τ ≈ 1 h — a thermal drift of a few mA has no business
+    // being chased in 10 s (the old τ), which is how real loads got eaten.
+    cfg->offset_zero_alpha = 0.1f / 3600.0f;
 }
 
 
@@ -72,6 +75,7 @@ void bame_init(bame_state_t* s, uint8_t cells, bool wiring_bus,
     s->capacity_ah        = capacity_ah;
     s->capacity_learned   = false;
     s->coulomb_count      = capacity_ah * 3600.0f;  // assume nominal-full at boot
+    s->coulomb_frac       = 0.0f;
     s->soc_uncertain      = true;                   // until a real event happens
     s->battery_present    = false;
     s->coulombs_at_last_full = 0.0f;
@@ -132,6 +136,7 @@ void bame_declare_full(bame_state_t* s, const bame_config_t* cfg,
     }
     s->max_delivered_c_in_cycle = 0.0f;
     s->coulomb_count         = bame_capacity_as(s);
+    s->coulomb_frac          = 0.0f;   // counter re-synced; drop the remainder
     s->coulombs_at_last_full = s->coulomb_count;
     s->since_last_full_ms    = now_ms;
     s->soc_uncertain         = false;
@@ -256,11 +261,27 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
 
     // Integration: suppressed while charger is driving the voltage.
     if (!s->charging_external) {
-        s->coulomb_count -= c * dt_s;
+        // Integrate into coulomb_frac, which stays within ±1 A·s and therefore
+        // keeps full float precision, then hand only whole A·s to the counter.
+        // Subtracting straight into coulomb_count would quantise badly: it sits
+        // around 288000 A·s where a float32 ULP is 0.03125, so a 100 ms tick at
+        // 0.45 A (0.045 A·s = 1.44 ULP) rounds to 0.03125 and loses ~31 % of the
+        // charge — and under ~0.156 A the step falls below ½ ULP and the counter
+        // stops moving entirely.
+        s->coulomb_frac -= c * dt_s;
+        if (s->coulomb_frac >= 1.0f || s->coulomb_frac <= -1.0f) {
+            float whole = (float)(int32_t)s->coulomb_frac;   // trunc toward zero
+            s->coulomb_count += whole;
+            s->coulomb_frac  -= whole;
+        }
     }
     float cap_as = bame_capacity_as(s);
     // Allow modest over/under-shoot so the cycle measurement sees real delta
-    s->coulomb_count = f_clampf(s->coulomb_count, -cap_as * 0.10f, cap_as * 1.10f);
+    float clamped = f_clampf(s->coulomb_count, -cap_as * 0.10f, cap_as * 1.10f);
+    if (clamped != s->coulomb_count) {
+        s->coulomb_count = clamped;
+        s->coulomb_frac  = 0.0f;   // don't let the fraction push past the clamp
+    }
 
     // --- Amplitude-max tracking: peak depth-of-discharge since last FULL.
     //     Only meaningful once we have a FULL reference; otherwise the
@@ -272,10 +293,18 @@ bame_event_t bame_step(bame_state_t* s, const bame_config_t* cfg,
         }
     }
 
-    // --- Slow current-offset auto-zero at low |I| ---
-    if (f_absf(c) < cfg->i_rest) {
-        float raw = c + s->current_offset;
-        s->current_offset = s->current_offset * 0.99f + raw * 0.01f;
+    // --- Current-offset auto-zero, only when nothing is drawing ---
+    // Tracks the INA226's thermal offset drift (a few mA). It may ONLY run when
+    // the reading is already inside the dead band — i.e. we're confident there
+    // is no real load. The old gate (|I| < i_rest = 0.3 A, τ ≈ 10 s) absorbed any
+    // genuine load under 0.3 A into the offset within ~30 s, making it invisible
+    // (a 0.2 A standby was counted as 0.0 A → several Ah/day vanished). It also
+    // never corrected anything: once dead-banded, raw == offset and the update is
+    // a no-op — so it only ever acted in the 0.05–0.3 A window, exactly where the
+    // real loads live.
+    if (c == 0.0f) {
+        s->current_offset = s->current_offset * (1.0f - cfg->offset_zero_alpha)
+                          + current_raw * cfg->offset_zero_alpha;
     }
 
     bame_event_t evt = BAME_EVT_NONE;

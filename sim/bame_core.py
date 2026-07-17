@@ -50,6 +50,7 @@ class BameConfig(Structure):
         ("v_knee_per_cell",       c_float),
         ("cap_ewma_alpha",        c_float),
         ("cavg_slow_alpha",       c_float),
+        ("offset_zero_alpha",     c_float),
     ]
 
 
@@ -60,6 +61,7 @@ class BameState(Structure):
         ("capacity_ah",              c_float),
         ("capacity_learned",         c_bool),
         ("coulomb_count",            c_float),
+        ("coulomb_frac",             c_float),
         ("soc_uncertain",            c_bool),
         ("battery_present",          c_bool),
         ("coulombs_at_last_full",    c_float),
