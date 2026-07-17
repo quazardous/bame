@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.12
+
+### Current and voltage swapped on the right
+
+The right of the main screen showed the **voltage** big with the **current** small
+underneath. Swapped: the **current is now the big readout** (it's the number you
+actually watch) with a small `A`, and the **voltage moves to the small line**
+below it as `13.2V`. Both stay right-aligned, the current's width adapting to its
+sign and decade (`3.7` / `-12.3` / `-30.0`).
+
+The `?` and the blinking provisional-capacity hint keep their place (top left,
+right after the `?`) — but the big current is 16 px tall and right-aligned with a
+variable width, so it now reaches down into that row. A guard skips the hint in
+the one case where they would overlap (3-digit Ah + 3-digit hint + a wide
+current like `-30.0`); on a typical pack there is ~18 px of clearance and the
+hint always shows.
+
+
 ## v2.11
 
 ### Two autonomies: instant (left) and 1-hour smoothed (right)

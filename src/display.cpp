@@ -45,11 +45,19 @@ void updateDisplay() {
   if (ahInt < 0) ahInt = 0;
   if (ahInt > (int)batteryCapacityAh) ahInt = (int)batteryCapacityAh;
   uint8_t ahDigits = (ahInt >= 100) ? 3 : (ahInt >= 10) ? 2 : 1;
+  // Right of line 1: the raw current, big (it's the number you watch). Width is
+  // computed so it stays right-aligned: "d.d" plus a digit per decade and one
+  // for a charge's minus sign, then the small 'A' suffix.
+  int   ciAbs = (int)abs(current);
+  uint8_t cLen = 3;                      // "d.d"
+  if (ciAbs >= 10)  cLen++;
+  if (ciAbs >= 100) cLen++;
+  if (current < 0)  cLen++;              // '-' when charging
   display.setTextSize(2);
   display.setCursor(0, BLUE_Y + 2);
   display.print(ahInt);
-  display.setCursor(SCREEN_W - 54, BLUE_Y + 2);
-  display.print(voltage, 1);
+  display.setCursor(SCREEN_W - 6 - cLen * 12, BLUE_Y + 2);
+  display.print(current, 1);
   display.setTextSize(1);
   display.setCursor(ahDigits * 12, BLUE_Y + 2);
   display.print(F("Ah"));
@@ -61,27 +69,32 @@ void updateDisplay() {
   // blinking, next to the '?', until a cycle confirms the real capacity. It's a
   // lower bound ("at least this big") that grows toward the true capacity as the
   // pack empties — an indication only, the big Ah/gauge are unchanged.
+  // The big current is right-aligned with a variable width and is 16 px tall, so
+  // it reaches down into this y+10 row. Only draw the hint if it actually fits
+  // to the left of it (3-digit Ah + 3-digit hint + "-30.0" would otherwise
+  // overlap). Dropping the hint is the right call: it's the optional decoration.
   if (!capacityLearned && deliveredAh >= 1.0f && (millis() / 500) % 2) {
-    display.setCursor(ahDigits * 12 + (socUncertain ? 8 : 0), BLUE_Y + 10);
-    display.print((int)(deliveredAh + 0.5f));
+    int dHint = (int)(deliveredAh + 0.5f);
+    uint8_t hLen = (dHint >= 100) ? 3 : (dHint >= 10) ? 2 : 1;
+    int16_t hx  = ahDigits * 12 + (socUncertain ? 8 : 0);
+    if (hx + hLen * 6 <= SCREEN_W - 6 - cLen * 12 - 2) {   // 2 px clearance
+      display.setCursor(hx, BLUE_Y + 10);
+      display.print(dHint);
+    }
   }
   display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
-  display.print(F("V"));
+  display.print(F("A"));
 
-  // Line 2: power (smoothed) + raw current
+  // Line 2: power (smoothed) left + voltage (small) right
   float iForPower = cAvgInit ? cAvg : current;
   display.setCursor(0, BLUE_Y + 22);
   display.print((int)abs(iForPower * voltage));
   display.print(F("W"));
   {
-    int ci = (int)abs(current);
-    uint8_t alen = 4;
-    if (ci >= 10) alen++;
-    if (ci >= 100) alen++;
-    if (current < 0) alen++;
-    display.setCursor(SCREEN_W - alen * 6, BLUE_Y + 22);
-    display.print(current, 1);
-    display.print(F("A"));
+    uint8_t vLen = (voltage >= 10.0f) ? 5 : 4;   // "13.2V" / "9.9V"
+    display.setCursor(SCREEN_W - vLen * 6, BLUE_Y + 22);
+    display.print(voltage, 1);
+    display.print(F("V"));
   }
 
   // Line 3 left: HH:MM remaining (active) or capacity (at rest), on the

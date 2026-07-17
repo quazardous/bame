@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.11"
+BAME_VERSION = "2.12"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -252,21 +252,26 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     ah_str = str(remaining_ah)
     d.text(0, BLUE_Y + 2, ah_str, size=2)
     ah_digits = len(ah_str)
+    # Right of line 1: current, big, right-aligned (width varies with sign/decade)
+    c_str = f"{current:.1f}"
+    cur_left = W - 6 - len(c_str) * 12
+    d.text(cur_left, BLUE_Y + 2, c_str, size=2)
+    d.text(W - 6, BLUE_Y + 2, "A")
     d.text(ah_digits * 12, BLUE_Y + 2, "Ah")
     if soc_uncertain:
         d.text(ah_digits * 12, BLUE_Y + 10, "?")
     # Provisional capacity measured this cycle (blinks in firmware; shown here
     # in its visible phase): peak Ah delivered so far, next to the '?'.
     if not capacity_learned and delivered_ah >= 1:
-        d.text(ah_digits * 12 + (8 if soc_uncertain else 0), BLUE_Y + 10,
-               str(int(delivered_ah + 0.5)))
-    d.text(W - 54, BLUE_Y + 2, f"{voltage:.1f}", size=2)
-    d.text(W - 6, BLUE_Y + 2, "V")
+        hint = str(int(delivered_ah + 0.5))
+        hx = ah_digits * 12 + (8 if soc_uncertain else 0)
+        if hx + len(hint) * 6 <= cur_left - 2:      # skip if the big current is in the way
+            d.text(hx, BLUE_Y + 10, hint)
 
     # Line 2: power (smoothed) left, raw current right
     power = int(abs(voltage * current))
     d.text(0, BLUE_Y + 22, f"{power}W")
-    d.text_right(W, BLUE_Y + 22, f"{current:.1f}A")
+    d.text_right(W, BLUE_Y + 22, f"{voltage:.1f}V")
 
     # Line 3: HH:MM (active) or learned capacity (rest), '*' if not learned
     ty = BLUE_Y + 37
