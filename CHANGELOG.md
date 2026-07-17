@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.11
+
+### Two autonomies: instant (left) and 1-hour smoothed (right)
+
+v2.9/v2.10 *replaced* the bottom-left autonomy with the slow average — wrong
+call: both figures are useful. The bottom-left estimate is back on the
+responsive 30 s average ("what's happening right now"), and the **1-hour
+smoothed autonomy is now a second readout at the bottom right**, marked `~`
+(the spot was free — it only ever held the LOAD-mode charging icon, which still
+takes precedence there).
+
+For an intermittent load this is the whole point: with a fridge, the left figure
+swings with the compressor while `~HH:MM` on the right shows the autonomy at the
+pack's **real duty-cycled draw** — the number to actually plan on. The slow
+readout uses a much lower gate (`SLOW_AUTONOMY_MIN` 0.1 A vs `ACTIVE_CURRENT`
+0.5 A): a duty-cycled fridge averages only a few hundred mA over the hour, yet
+that's a real draw with a real autonomy.
+
+
 ## v2.10
 
 ### Autonomy usable from the first second (warm-up)

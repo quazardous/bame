@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.10"
+BAME_VERSION = "2.11"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -241,7 +241,8 @@ def draw_trend_arrow(d, x, y, direction):
 # --- Main display: mirrors updateDisplay() in src/display.cpp (v2) ---
 
 def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
-               soc_uncertain=False, capacity_learned=True, delivered_ah=0):
+               soc_uncertain=False, capacity_learned=True, delivered_ah=0,
+               slow_current=None):
     d.clear()
     remaining_ah = int(soc * cap_ah / 100)
 
@@ -286,9 +287,13 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
         if not capacity_learned:
             d.text(28, ty, "*")
 
-    # Bottom-right charging icon when rest voltage ≥ top OCV (post-charge)
+    # Bottom-right: same autonomy on the slow (τ ≈ 1 h) average, marked '~'.
+    # The LOAD charging icon shares this spot and takes precedence.
     if voltage / cells >= 3.40 and abs(current) < 0.5:
         draw_charging_battery(d, 106, ty, full=True)
+    elif slow_current is not None and slow_current > 0.1:
+        hs = max(0.0, min(99.9, remaining_ah / slow_current))
+        d.text(W - 36, ty, f"~{int(hs):02d}:{int((hs - int(hs)) * 60):02d}")
 
 
 # --- Screens ---
@@ -297,7 +302,8 @@ def screen_main_discharge(d):
     # Capacity not yet confirmed: '?' + blinking provisional measurement (13 Ah
     # delivered so far) next to the big remaining Ah.
     _draw_main(d, voltage=13.2, current=3.7, soc=84, cap_ah=80,
-               soc_uncertain=True, capacity_learned=False, delivered_ah=13)
+               soc_uncertain=True, capacity_learned=False, delivered_ah=13,
+               slow_current=1.2)
 
 
 def screen_main_charge(d):

@@ -9,6 +9,10 @@
 #define MIN_BATTERY_V       1.0f
 #define ACTIVE_CURRENT      0.5f
 #define LFP_CELL_TOP_REST   3.40f
+// Slow (τ ≈ 1 h) autonomy gate. Much lower than ACTIVE_CURRENT: a duty-cycled
+// fridge averages only a few hundred mA over the hour, yet that's a real draw
+// with a real autonomy worth showing.
+#define SLOW_AUTONOMY_MIN   0.1f
 
 
 void updateDisplay() {
@@ -80,13 +84,10 @@ void updateDisplay() {
     display.print(F("A"));
   }
 
-  // Line 3: HH:MM remaining (active) or capacity (at rest)
-  // Driven by the SLOW current average (τ ≈ 1 h): an intermittent load (fridge
-  // compressor) then averages to its real duty cycle, so the estimate stays
-  // steady instead of swinging — and the line doesn't flip to "at rest" every
-  // time the compressor stops. Watts keep the responsive 30 s average.
+  // Line 3 left: HH:MM remaining (active) or capacity (at rest), on the
+  // responsive 30 s average — the "right now" figure.
   int16_t ty = BLUE_Y + 37;
-  float iAuto = cAvgInit ? cAvgSlow : current;
+  float iAuto = cAvgInit ? cAvg : current;
   if (iAuto > ACTIVE_CURRENT) {
     float hoursLeft = (coulombCount / 3600.0) / iAuto;
     hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
@@ -123,10 +124,30 @@ void updateDisplay() {
     }
   }
 
-  // Bottom right: charging icon when firmware believes an external charger
-  // is active (LOAD mode). Hysteresis in bame_core keeps this from flickering.
+  // Bottom right: the SAME autonomy but on the slow average (τ ≈ 1 h), marked
+  // '~'. For an intermittent load (fridge compressor) this reflects the real
+  // duty-cycled draw, so it stays steady and is the figure to plan on — while
+  // the left one tracks what's happening right now. Its threshold is far lower
+  // than ACTIVE_CURRENT: a duty-cycled fridge averages only a few hundred mA,
+  // which is still a perfectly real draw with a real autonomy.
+  // The LOAD-mode charging icon lives here too and takes precedence.
   if (chargingExternal) {
     gfx.drawChargingBattery(106, ty, true);
+  } else {
+    float iSlow = cAvgInit ? cAvgSlow : current;
+    if (iSlow > SLOW_AUTONOMY_MIN) {
+      float hSlow = (coulombCount / 3600.0) / iSlow;
+      hSlow = constrain(hSlow, 0.0f, 99.9f);
+      int h = (int)hSlow;
+      int m = (int)((hSlow - h) * 60);
+      display.setCursor(SCREEN_W - 36, ty);
+      display.print('~');
+      if (h < 10) display.print('0');
+      display.print(h);
+      display.print(':');
+      if (m < 10) display.print('0');
+      display.print(m);
+    }
   }
 
   display.display();
