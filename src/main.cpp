@@ -56,12 +56,15 @@
 // --- Screen power management ---
 // The OLED (SSD1306, no backlight — pixels self-emit) sleeps via a software
 // command after SCREEN_TIMEOUT_MS with no electrical activity. There is no
-// wake button in the install, so the wake source is the measurement itself:
-// any current past the dead-band (either sign) or any voltage step re-arms
-// the timer / wakes the panel. Power-on arms it too → 2 min on after boot.
+// wake button in the install, so the wake source is the measurement itself.
+// Activity is a *change* in current or voltage between ticks — not an absolute
+// level: a persistent baseline (a small offset, or a steady standby draw) then
+// lets the panel sleep, while a load switching on (a compressor start jumps the
+// current and sags the voltage) wakes it. Power-on arms it too → 2 min on after
+// boot.
 #define SCREEN_TIMEOUT_MS  120000UL  // sleep after 2 min with no activity
-#define SCREEN_WAKE_I      0.05f     // |current| (A) past the dead-band = activity
-#define SCREEN_WAKE_DV     0.05f     // voltage step (V) between ticks = activity
+#define SCREEN_WAKE_DI     0.20f     // current (A) change between ticks = activity
+#define SCREEN_WAKE_DV     0.05f     // voltage change (V) between ticks = activity
 
 // --- EEPROM: wear-leveled, CRC-checked ring buffer ---
 // One "live" record (coulomb counter + learned capacity + two-anchor state)
@@ -199,6 +202,7 @@ static void eepromLoad() {
 static bool          screenOn       = true;
 static unsigned long lastActivityMs = 0;
 static float         prevVoltage    = 0;
+static float         prevCurrent    = 0;
 
 // Wake the panel (if asleep) and extend the on-time by SCREEN_TIMEOUT_MS.
 static void screenWake() {
@@ -221,8 +225,9 @@ static void screenSleep() {
 // Called once per measurement tick: decide wake vs sleep from the fresh
 // voltage/current globals. `now` is the measurement's millis timestamp.
 static void updateScreenPower(unsigned long now) {
-  bool active = (fabsf(current) > SCREEN_WAKE_I)
+  bool active = (fabsf(current - prevCurrent) > SCREEN_WAKE_DI)
              || (fabsf(voltage - prevVoltage) > SCREEN_WAKE_DV);
+  prevCurrent = current;
   prevVoltage = voltage;
   if (active) {
     screenWake();

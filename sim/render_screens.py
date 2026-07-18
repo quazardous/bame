@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.17"
+BAME_VERSION = "2.18"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -273,6 +273,13 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     d.text(0, BLUE_Y + 22, f"{power}W")
     d.text_right(W, BLUE_Y + 22, f"{voltage:.1f}V")
 
+    # Long-term (slow) autonomy: single most-significant whole unit (d/h/m/s).
+    def fmt_short(hours):
+        if hours >= 24:      return f"{int(hours/24)}d"
+        if hours >= 1:       return f"{int(hours)}h"
+        if hours * 60 >= 1:  return f"{int(hours*60)}m"
+        return f"{int(hours*3600)}s"
+
     # HH:MM below 100 h, else days ("4.2d" / "18d") — mirrors printDuration().
     def fmt_dur(hours):
         if hours < 100.0:
@@ -302,7 +309,7 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     if voltage / cells >= 3.40 and abs(current) < 0.5:
         draw_charging_battery(d, 106, ty, full=True)
     elif slow_current is not None and slow_current > 0.1:
-        d.text_right(W, ty, fmt_dur(remaining_ah / slow_current))
+        d.text_right(W, ty, fmt_short(remaining_ah / slow_current))
 
 
 # --- Screens ---

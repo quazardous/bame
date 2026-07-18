@@ -26,12 +26,16 @@ static uint8_t numLen(long v) {           // digits of a non-negative int
   while (v >= 10) { v /= 10; n++; }
   return n;
 }
-static uint8_t durationLen(float hours) { // width of what printDuration() prints
-  if (hours < 100.0f) return 5;           // "HH:MM"
-  float days = hours / 24.0f;
-  if (days > 999.0f) days = 999.0f;
-  if (days < 10.0f) return 4;             // "4.2d"
-  return numLen((long)days) + 1;          // "NNd"
+
+// Compact single-unit form for the long-term (slow) autonomy: just the most
+// significant whole unit with its suffix — "7d", "18h", "45m", "30s". A rough
+// planning figure doesn't need HH:MM precision. Returns the value and sets the
+// suffix; a separate print keeps the width calc (for right-alignment) in sync.
+static long shortValue(float hours, char* suffix) {
+  if (hours >= 24.0f)        { *suffix = 'd'; return (long)(hours / 24.0f); }
+  if (hours >= 1.0f)         { *suffix = 'h'; return (long)hours; }
+  if (hours * 60.0f >= 1.0f) { *suffix = 'm'; return (long)(hours * 60.0f); }
+  *suffix = 's';             return (long)(hours * 3600.0f);
 }
 
 static void printDuration(float hours) {
@@ -182,9 +186,13 @@ void updateDisplay() {
         display.print(w);
         display.print('W');
       } else {
+        // Long-term autonomy: single most-significant whole unit (d/h/m/s).
         float hSlow = (coulombCount / 3600.0) / iSlow;
-        display.setCursor(SCREEN_W - durationLen(hSlow) * 6, ty);
-        printDuration(hSlow);
+        char suf;
+        long v = shortValue(hSlow, &suf);
+        display.setCursor(SCREEN_W - (numLen(v) + 1) * 6, ty);
+        display.print(v);
+        display.print(suf);
       }
     }
   }

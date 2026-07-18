@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.18
+
+### Long-term autonomy as a single unit
+
+The bottom-right (slow) autonomy dropped HH:MM for one most-significant whole
+unit with a suffix: `7d` / `18h` / `45m` / `30s`. A planning figure doesn't need
+minutes of precision. The bottom-left instant autonomy keeps HH:MM (the precise
+countdown you watch tick).
+
+### Screen sleeps on a steady baseline draw
+
+The OLED woke on any absolute current above 50 mA, so it never slept once the
+reading sat at a persistent ~0.1 A (a small offset, or a steady standby such as
+BaMe drawing its own supply through the shunt). Wake is now a *change* between
+ticks — current by > 0.2 A or voltage by > 50 mV — so a steady baseline lets the
+panel sleep, while a load switching on (a compressor jumps the current and sags
+the voltage) still wakes it. Robust to any baseline level, unlike a fixed
+threshold.
+
+
 ## v2.17
 
 ### Drop the '~' prefix on the slow readout
