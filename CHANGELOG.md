@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.21
+
+### Small loads wake the screen again
+
+v2.18's screen-wake current-change threshold (0.2 A) was too high: plugging or
+unplugging the fridge in standby (~0.07 A) didn't move the current enough to wake
+the panel. Lowered to 0.04 A — just under the 50 mA dead band, so any *visible*
+load appearing/disappearing (which jumps the current by at least the dead band)
+wakes it, while a steady baseline still sleeps.
+
+
 ## v2.20
 
 ### Layout regrouped: stable on the left, variable on the right

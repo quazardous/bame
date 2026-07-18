@@ -63,7 +63,12 @@
 // current and sags the voltage) wakes it. Power-on arms it too → 2 min on after
 // boot.
 #define SCREEN_TIMEOUT_MS  120000UL  // sleep after 2 min with no activity
-#define SCREEN_WAKE_DI     0.20f     // current (A) change between ticks = activity
+// Wake on a current change just below the ±50 mA dead band: since the reading is
+// zeroed under 50 mA, any *visible* load appearing/disappearing jumps the current
+// by at least that, so 0.04 A catches even the fridge's ~0.07 A standby being
+// plugged/unplugged — while a steady baseline (current pinned at 0 at rest) still
+// produces no change and lets the panel sleep.
+#define SCREEN_WAKE_DI     0.04f     // current (A) change between ticks = activity
 #define SCREEN_WAKE_DV     0.05f     // voltage change (V) between ticks = activity
 
 // --- EEPROM: wear-leveled, CRC-checked ring buffer ---
