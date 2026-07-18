@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.20
+
+### Layout regrouped: stable on the left, variable on the right
+
+The blue zone is now organised by how much each figure moves, so your eye finds
+the jumpy numbers in one place:
+
+- **Left column (slow-varying):** remaining Ah, voltage, and — bottom-left — the
+  slow consumption + slow autonomy together, e.g. `5W 6d` (the τ ≈ 1 h
+  duty-cycled draw and the autonomy it implies). At rest it falls back to the
+  capacity (`80Ah`, `*` until learned).
+- **Right column (fast-varying):** the big current, the watts, and the instant
+  autonomy with its direction arrow, e.g. `◀18:06`.
+
+The bottom-right slow readout no longer alternates (v2.15–2.19): the slow
+consumption moved next to the slow autonomy on the left as `5W 6d`, and the live
+watts sit on the right.
+
+
 ## v2.19
 
 ### No more spurious '?' after a reboot

@@ -56,6 +56,15 @@ static void printDuration(float hours) {
   }
 }
 
+// Character width of what printDuration() prints, for right-alignment.
+static uint8_t durationLen(float hours) {
+  if (hours < 100.0f) return 5;             // "HH:MM"
+  float days = hours / 24.0f;
+  if (days > 999.0f) days = 999.0f;
+  if (days < 10.0f) return 4;               // "4.2d"
+  return numLen((long)days) + 1;            // "NNd"
+}
+
 void updateDisplay() {
   display.clearDisplay();
 
@@ -126,74 +135,60 @@ void updateDisplay() {
   display.setCursor(SCREEN_W - 6, BLUE_Y + 2);
   display.print(F("A"));
 
-  // Line 2: power (smoothed) left + voltage (small) right
-  float iForPower = cAvgInit ? cAvg : current;
+  // Layout: LEFT column = slow-varying (voltage, slow consumption + autonomy);
+  //         RIGHT column = fast-varying (watts, instant autonomy).
+
+  // Line 2: voltage (left) | watts (right, 30 s smoothed)
   display.setCursor(0, BLUE_Y + 22);
-  display.print((int)abs(iForPower * voltage));
-  display.print(F("W"));
+  display.print(voltage, 1);
+  display.print(F("V"));
   {
-    uint8_t vLen = (voltage >= 10.0f) ? 5 : 4;   // "13.2V" / "9.9V"
-    display.setCursor(SCREEN_W - vLen * 6, BLUE_Y + 22);
-    display.print(voltage, 1);
-    display.print(F("V"));
+    float iForPower = cAvgInit ? cAvg : current;
+    int w = (int)abs(iForPower * voltage);
+    display.setCursor(SCREEN_W - (numLen(w) + 1) * 6, BLUE_Y + 22);
+    display.print(w);
+    display.print(F("W"));
   }
 
-  // Line 3 left: HH:MM remaining (active) or capacity (at rest), on the
-  // responsive 30 s average — the "right now" figure.
+  // Line 3 LEFT (stable): slow consumption + slow autonomy, e.g. "5W 6d" — the
+  // duty-cycled draw (τ ≈ 1 h) and the autonomy it implies. Falls back to the
+  // capacity ('*' if not yet learned) when nothing is drawing.
   int16_t ty = BLUE_Y + 37;
-  float iAuto = cAvgInit ? cAvg : current;
-  if (iAuto > ACTIVE_CURRENT) {
-    float hoursLeft = (coulombCount / 3600.0) / iAuto;
-    display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
-    display.setCursor(10, ty);
-    printDuration(hoursLeft);
-  } else if (iAuto < -ACTIVE_CURRENT) {
-    float remaining = (capacityAs() - coulombCount) / 3600.0f;
-    if (remaining < 0) remaining = 0;
-    float hoursLeft = remaining / (-iAuto);
-    display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
-    display.setCursor(10, ty);
-    printDuration(hoursLeft);
+  float iSlow = cAvgInit ? cAvgSlow : current;
+  display.setCursor(0, ty);
+  if (iSlow > SLOW_AUTONOMY_MIN) {
+    display.print((int)(iSlow * voltage));
+    display.print(F("W "));
+    char suf;
+    long v = shortValue((coulombCount / 3600.0) / iSlow, &suf);
+    display.print(v);
+    display.print(suf);
   } else {
-    display.setCursor(0, ty);
     display.print((int)batteryCapacityAh);
     display.print(F("Ah"));
-    if (!capacityLearned) {
-      display.setCursor(28, ty);
-      display.print('*');
-    }
+    if (!capacityLearned) display.print('*');
   }
 
-  // Bottom right: the SAME autonomy but on the slow average (τ ≈ 1 h), marked
-  // '~'. For an intermittent load (fridge compressor) this reflects the real
-  // duty-cycled draw, so it stays steady and is the figure to plan on — while
-  // the left one tracks what's happening right now. Its threshold is far lower
-  // than ACTIVE_CURRENT: a duty-cycled fridge averages only a few hundred mA,
-  // which is still a perfectly real draw with a real autonomy.
-  // The LOAD-mode charging icon lives here too and takes precedence.
+  // Line 3 RIGHT (variable): instant autonomy with a direction arrow, on the
+  // responsive 30 s average — the "right now" figure, right-aligned. The
+  // LOAD-mode charging icon shares this spot and takes precedence.
   if (chargingExternal) {
     gfx.drawChargingBattery(106, ty, true);
   } else {
-    float iSlow = cAvgInit ? cAvgSlow : current;
-    if (iSlow > SLOW_AUTONOMY_MIN) {
-      // Both readouts are on the slow (τ ≈ 1 h) average, right-aligned to the
-      // screen edge. Alternate every 3 s between the autonomy and the average
-      // consumption in watts — two ways to read the same duty-cycled draw (the
-      // planning figure). The 'd'/':'/'W' suffix identifies each on its own.
-      if ((millis() / 3000) % 2) {
-        int w = (int)(iSlow * voltage);
-        display.setCursor(SCREEN_W - (1 + numLen(w)) * 6, ty);
-        display.print(w);
-        display.print('W');
-      } else {
-        // Long-term autonomy: single most-significant whole unit (d/h/m/s).
-        float hSlow = (coulombCount / 3600.0) / iSlow;
-        char suf;
-        long v = shortValue(hSlow, &suf);
-        display.setCursor(SCREEN_W - (numLen(v) + 1) * 6, ty);
-        display.print(v);
-        display.print(suf);
-      }
+    float iAuto = cAvgInit ? cAvg : current;
+    bool discharge = iAuto > ACTIVE_CURRENT;
+    bool charge    = iAuto < -ACTIVE_CURRENT;
+    if (discharge || charge) {
+      float hoursLeft = discharge
+          ? (coulombCount / 3600.0) / iAuto
+          : ((capacityAs() - coulombCount) / 3600.0f) / (-iAuto);
+      if (hoursLeft < 0) hoursLeft = 0;
+      int16_t tx = SCREEN_W - durationLen(hoursLeft) * 6;
+      int16_t ax = tx - 8;   // arrow 8 px left of the time
+      if (discharge) display.fillTriangle(ax, ty + 3, ax + 6, ty, ax + 6, ty + 6, SSD1306_WHITE);
+      else           display.fillTriangle(ax + 6, ty + 3, ax, ty, ax, ty + 6, SSD1306_WHITE);
+      display.setCursor(tx, ty);
+      printDuration(hoursLeft);
     }
   }
 

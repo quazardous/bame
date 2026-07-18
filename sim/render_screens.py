@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.19"
+BAME_VERSION = "2.20"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -248,11 +248,26 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
 
     draw_gauge(d, soc)
 
-    # Line 1: big Ah (left) + big voltage (right), '?' if soc uncertain
+    def fmt_short(hours):   # slow autonomy: single most-significant unit d/h/m/s
+        if hours >= 24:      return f"{int(hours/24)}d"
+        if hours >= 1:       return f"{int(hours)}h"
+        if hours * 60 >= 1:  return f"{int(hours*60)}m"
+        return f"{int(hours*3600)}s"
+
+    def fmt_dur(hours):     # instant autonomy: HH:MM below 100 h, else days
+        if hours < 100.0:
+            h = int(hours); m = int((hours - h) * 60)
+            return f"{h:02d}:{m:02d}"
+        days = min(999.0, hours / 24.0)
+        return (f"{days:.1f}d" if days < 10.0 else f"{int(days)}d")
+
+    # Layout: LEFT column = slow-varying (Ah, voltage, slow autonomy/capacity);
+    #         RIGHT column = fast-varying (current, watts, instant autonomy).
+
+    # Line 1: Ah (left, big) + '?'/hint | current (right, big)
     ah_str = str(remaining_ah)
     d.text(0, BLUE_Y + 2, ah_str, size=2)
     ah_digits = len(ah_str)
-    # Right of line 1: current, big, right-aligned (width varies with sign/decade)
     c_str = f"{current:.1f}"
     cur_left = W - 6 - len(c_str) * 12
     d.text(cur_left, BLUE_Y + 2, c_str, size=2)
@@ -260,56 +275,39 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     d.text(ah_digits * 12, BLUE_Y + 2, "Ah")
     if soc_uncertain:
         d.text(ah_digits * 12, BLUE_Y + 10, "?")
-    # Provisional capacity measured this cycle (blinks in firmware; shown here
-    # in its visible phase): peak Ah delivered so far, next to the '?'.
     if not capacity_learned and delivered_ah >= 1:
         hint = str(int(delivered_ah + 0.5))
         hx = ah_digits * 12 + (8 if soc_uncertain else 0)
-        if hx + len(hint) * 6 <= cur_left - 2:      # skip if the big current is in the way
+        if hx + len(hint) * 6 <= cur_left - 2:
             d.text(hx, BLUE_Y + 10, hint)
 
-    # Line 2: power (smoothed) left, raw current right
-    power = int(abs(voltage * current))
-    d.text(0, BLUE_Y + 22, f"{power}W")
-    d.text_right(W, BLUE_Y + 22, f"{voltage:.1f}V")
+    # Line 2: voltage (left) | watts (right)
+    d.text(0, BLUE_Y + 22, f"{voltage:.1f}V")
+    d.text_right(W, BLUE_Y + 22, f"{int(abs(voltage * current))}W")
 
-    # Long-term (slow) autonomy: single most-significant whole unit (d/h/m/s).
-    def fmt_short(hours):
-        if hours >= 24:      return f"{int(hours/24)}d"
-        if hours >= 1:       return f"{int(hours)}h"
-        if hours * 60 >= 1:  return f"{int(hours*60)}m"
-        return f"{int(hours*3600)}s"
-
-    # HH:MM below 100 h, else days ("4.2d" / "18d") — mirrors printDuration().
-    def fmt_dur(hours):
-        if hours < 100.0:
-            h = int(hours); m = int((hours - h) * 60)
-            return f"{h:02d}:{m:02d}"
-        days = min(999.0, hours / 24.0)
-        return (f"{days:.1f}d" if days < 10.0 else f"{int(days)}d")
-
-    # Line 3: autonomy (active) or learned capacity (rest), '*' if not learned
+    # Line 3 LEFT: slow consumption + slow autonomy ("5W 6d"), or capacity at rest
     ty = BLUE_Y + 37
-    active_i = 0.5  # ACTIVE_CURRENT
-    if abs(current) > active_i:
-        if current > 0:
-            hours_left = remaining_ah / current
-            d.fill_triangle(0, ty + 3, 6, ty, 6, ty + 6)  # discharge
-        else:
-            hours_left = (cap_ah - remaining_ah) / (-current)
-            d.fill_triangle(6, ty + 3, 0, ty, 0, ty + 6)  # charge
-        d.text(10, ty, fmt_dur(hours_left))
+    if slow_current is not None and slow_current > 0.1:
+        d.text(0, ty, f"{int(voltage * slow_current)}W {fmt_short(remaining_ah / slow_current)}")
     else:
-        d.text(0, ty, f"{int(cap_ah)}Ah")
+        cap_str = f"{int(cap_ah)}Ah"
+        d.text(0, ty, cap_str)
         if not capacity_learned:
-            d.text(28, ty, "*")
+            d.text(len(cap_str) * 6 + 2, ty, "*")
 
-    # Bottom-right: same autonomy on the slow (τ ≈ 1 h) average, marked '~'.
-    # The LOAD charging icon shares this spot and takes precedence.
+    # Line 3 RIGHT: instant autonomy with a direction arrow (or the charging icon)
     if voltage / cells >= 3.40 and abs(current) < 0.5:
         draw_charging_battery(d, 106, ty, full=True)
-    elif slow_current is not None and slow_current > 0.1:
-        d.text_right(W, ty, fmt_short(remaining_ah / slow_current))
+    elif abs(current) > 0.5:
+        hours = remaining_ah / current if current > 0 else (cap_ah - remaining_ah) / (-current)
+        ts = fmt_dur(hours)
+        tx = W - len(ts) * 6
+        d.text(tx, ty, ts)
+        ax = tx - 8
+        if current > 0:
+            d.fill_triangle(ax, ty + 3, ax + 6, ty, ax + 6, ty + 6)  # discharge
+        else:
+            d.fill_triangle(ax + 6, ty + 3, ax, ty, ax, ty + 6)      # charge
 
 
 # --- Screens ---
