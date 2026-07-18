@@ -15,6 +15,29 @@
 #define SLOW_AUTONOMY_MIN   0.1f
 
 
+// Print a duration at the current cursor. Below 100 h it's HH:MM as before;
+// above, it switches to days ("4.2d", then "18d") so a low duty-cycled draw
+// isn't stuck at the old 99:59 ceiling. Stays within 6 chars either way, so it
+// fits the tight bottom-right slot. Capped at 999 d (a regime no real pack
+// reaches — 80 Ah would need ~3 mA).
+static void printDuration(float hours) {
+  if (hours < 100.0f) {
+    int h = (int)hours;
+    int m = (int)((hours - h) * 60);
+    if (h < 10) display.print('0');
+    display.print(h);
+    display.print(':');
+    if (m < 10) display.print('0');
+    display.print(m);
+  } else {
+    float days = hours / 24.0f;
+    if (days > 999.0f) days = 999.0f;
+    if (days < 10.0f) display.print(days, 1);   // "4.2"
+    else              display.print((int)days); // "18"
+    display.print('d');
+  }
+}
+
 void updateDisplay() {
   display.clearDisplay();
 
@@ -103,30 +126,16 @@ void updateDisplay() {
   float iAuto = cAvgInit ? cAvg : current;
   if (iAuto > ACTIVE_CURRENT) {
     float hoursLeft = (coulombCount / 3600.0) / iAuto;
-    hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
-    int h = (int)hoursLeft;
-    int m = (int)((hoursLeft - h) * 60);
     display.fillTriangle(0, ty + 3, 6, ty, 6, ty + 6, SSD1306_WHITE);
     display.setCursor(10, ty);
-    if (h < 10) display.print('0');
-    display.print(h);
-    display.print(':');
-    if (m < 10) display.print('0');
-    display.print(m);
+    printDuration(hoursLeft);
   } else if (iAuto < -ACTIVE_CURRENT) {
     float remaining = (capacityAs() - coulombCount) / 3600.0f;
     if (remaining < 0) remaining = 0;
     float hoursLeft = remaining / (-iAuto);
-    hoursLeft = constrain(hoursLeft, 0.0f, 99.9f);
-    int h = (int)hoursLeft;
-    int m = (int)((hoursLeft - h) * 60);
     display.fillTriangle(6, ty + 3, 0, ty, 0, ty + 6, SSD1306_WHITE);
     display.setCursor(10, ty);
-    if (h < 10) display.print('0');
-    display.print(h);
-    display.print(':');
-    if (m < 10) display.print('0');
-    display.print(m);
+    printDuration(hoursLeft);
   } else {
     display.setCursor(0, ty);
     display.print((int)batteryCapacityAh);
@@ -150,16 +159,9 @@ void updateDisplay() {
     float iSlow = cAvgInit ? cAvgSlow : current;
     if (iSlow > SLOW_AUTONOMY_MIN) {
       float hSlow = (coulombCount / 3600.0) / iSlow;
-      hSlow = constrain(hSlow, 0.0f, 99.9f);
-      int h = (int)hSlow;
-      int m = (int)((hSlow - h) * 60);
       display.setCursor(SCREEN_W - 36, ty);
       display.print('~');
-      if (h < 10) display.print('0');
-      display.print(h);
-      display.print(':');
-      if (m < 10) display.print('0');
-      display.print(m);
+      printDuration(hSlow);
     }
   }
 

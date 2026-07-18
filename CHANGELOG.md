@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.14
+
+### Autonomy no longer capped at 99:59
+
+Both autonomies (the instant one bottom-left, the 1-hour-smoothed `~` one
+bottom-right) were `constrain`ed to 99.9 h because HH:MM can't show more. On a
+low duty-cycled draw that ceiling is hit constantly — an 80 Ah pack at 0.4 A
+average is 167 h, shown as a useless `99:59`. A shared `printDuration()` now
+keeps HH:MM below 100 h and switches to days above (`4.2d` up to 10 days, then
+`18d`), so the planning figure reads true. Still ≤6 chars, so it fits the tight
+bottom-right slot; capped at 999 d, a regime no real pack reaches.
+
+
 ## v2.13
 
 ### Two integrator bugs fixed: the counter was silently wrong

@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.13"
+BAME_VERSION = "2.14"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -273,7 +273,15 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     d.text(0, BLUE_Y + 22, f"{power}W")
     d.text_right(W, BLUE_Y + 22, f"{voltage:.1f}V")
 
-    # Line 3: HH:MM (active) or learned capacity (rest), '*' if not learned
+    # HH:MM below 100 h, else days ("4.2d" / "18d") — mirrors printDuration().
+    def fmt_dur(hours):
+        if hours < 100.0:
+            h = int(hours); m = int((hours - h) * 60)
+            return f"{h:02d}:{m:02d}"
+        days = min(999.0, hours / 24.0)
+        return (f"{days:.1f}d" if days < 10.0 else f"{int(days)}d")
+
+    # Line 3: autonomy (active) or learned capacity (rest), '*' if not learned
     ty = BLUE_Y + 37
     active_i = 0.5  # ACTIVE_CURRENT
     if abs(current) > active_i:
@@ -283,10 +291,7 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
         else:
             hours_left = (cap_ah - remaining_ah) / (-current)
             d.fill_triangle(6, ty + 3, 0, ty, 0, ty + 6)  # charge
-        hours_left = max(0.0, min(99.9, hours_left))
-        h = int(hours_left)
-        m = int((hours_left - h) * 60)
-        d.text(10, ty, f"{h:02d}:{m:02d}")
+        d.text(10, ty, fmt_dur(hours_left))
     else:
         d.text(0, ty, f"{int(cap_ah)}Ah")
         if not capacity_learned:
@@ -297,8 +302,7 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     if voltage / cells >= 3.40 and abs(current) < 0.5:
         draw_charging_battery(d, 106, ty, full=True)
     elif slow_current is not None and slow_current > 0.1:
-        hs = max(0.0, min(99.9, remaining_ah / slow_current))
-        d.text(W - 36, ty, f"~{int(hs):02d}:{int((hs - int(hs)) * 60):02d}")
+        d.text(W - 36, ty, f"~{fmt_dur(remaining_ah / slow_current)}")
 
 
 # --- Screens ---
@@ -308,7 +312,7 @@ def screen_main_discharge(d):
     # delivered so far) next to the big remaining Ah.
     _draw_main(d, voltage=13.2, current=3.7, soc=84, cap_ah=80,
                soc_uncertain=True, capacity_learned=False, delivered_ah=13,
-               slow_current=1.2)
+               slow_current=0.4)
 
 
 def screen_main_charge(d):
