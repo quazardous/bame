@@ -20,6 +20,20 @@
 // isn't stuck at the old 99:59 ceiling. Stays within 6 chars either way, so it
 // fits the tight bottom-right slot. Capped at 999 d (a regime no real pack
 // reaches — 80 Ah would need ~3 mA).
+// Character counts, so the bottom-right readout can be right-aligned.
+static uint8_t numLen(long v) {           // digits of a non-negative int
+  uint8_t n = 1;
+  while (v >= 10) { v /= 10; n++; }
+  return n;
+}
+static uint8_t durationLen(float hours) { // width of what printDuration() prints
+  if (hours < 100.0f) return 5;           // "HH:MM"
+  float days = hours / 24.0f;
+  if (days > 999.0f) days = 999.0f;
+  if (days < 10.0f) return 4;             // "4.2d"
+  return numLen((long)days) + 1;          // "NNd"
+}
+
 static void printDuration(float hours) {
   if (hours < 100.0f) {
     int h = (int)hours;
@@ -158,15 +172,21 @@ void updateDisplay() {
   } else {
     float iSlow = cAvgInit ? cAvgSlow : current;
     if (iSlow > SLOW_AUTONOMY_MIN) {
-      display.setCursor(SCREEN_W - 36, ty);
-      display.print('~');   // both readouts are on the slow (τ ≈ 1 h) average
-      // Alternate every 3 s between the autonomy and the average consumption in
-      // watts — two ways to read the same duty-cycled draw (the planning figure).
+      // Both readouts are on the slow (τ ≈ 1 h) average, prefixed '~', and
+      // right-aligned to the screen edge. Alternate every 3 s between the
+      // autonomy and the average consumption in watts — two ways to read the
+      // same duty-cycled draw (the planning figure).
       if ((millis() / 3000) % 2) {
-        display.print((int)(iSlow * voltage));
+        int w = (int)(iSlow * voltage);
+        display.setCursor(SCREEN_W - (2 + numLen(w)) * 6, ty);
+        display.print('~');
+        display.print(w);
         display.print('W');
       } else {
-        printDuration((coulombCount / 3600.0) / iSlow);
+        float hSlow = (coulombCount / 3600.0) / iSlow;
+        display.setCursor(SCREEN_W - (1 + durationLen(hSlow)) * 6, ty);
+        display.print('~');
+        printDuration(hSlow);
       }
     }
   }

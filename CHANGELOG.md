@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.16
+
+### Bottom-right readout right-aligned
+
+The slow `~` autonomy/watts readout was anchored at a fixed x, so shorter strings
+(`~7.0d`, `~5W`) left a gap at the screen edge. It's now right-aligned to the
+edge, its start computed from the string width.
+
+
 ## v2.15
 
 ### Bottom-right alternates autonomy and average watts

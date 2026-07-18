@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.15"
+BAME_VERSION = "2.16"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -302,7 +302,7 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
     if voltage / cells >= 3.40 and abs(current) < 0.5:
         draw_charging_battery(d, 106, ty, full=True)
     elif slow_current is not None and slow_current > 0.1:
-        d.text(W - 36, ty, f"~{fmt_dur(remaining_ah / slow_current)}")
+        d.text_right(W, ty, f"~{fmt_dur(remaining_ah / slow_current)}")
 
 
 # --- Screens ---
