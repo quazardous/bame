@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.15
+
+### Bottom-right alternates autonomy and average watts
+
+The `~` slow readout (bottom-right) now alternates every 3 s between the
+autonomy (`~7.0d`) and the average consumption in watts (`~5W`) — two readings of
+the same duty-cycled draw. Both are prefixed `~` (the τ ≈ 1 h average) and are
+gated the same way, so the slot stays empty when nothing is drawing.
+
+
 ## v2.14
 
 ### Autonomy no longer capped at 99:59
