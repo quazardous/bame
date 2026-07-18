@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.17
+
+### Drop the '~' prefix on the slow readout
+
+The `~` added nothing — the `d`/`:`/`W` suffix already identifies each reading,
+and its position (right edge, separate from the left autonomy) is unambiguous.
+Now just `7.0d` / `5W`.
+
+
 ## v2.16
 
 ### Bottom-right readout right-aligned

@@ -172,20 +172,18 @@ void updateDisplay() {
   } else {
     float iSlow = cAvgInit ? cAvgSlow : current;
     if (iSlow > SLOW_AUTONOMY_MIN) {
-      // Both readouts are on the slow (τ ≈ 1 h) average, prefixed '~', and
-      // right-aligned to the screen edge. Alternate every 3 s between the
-      // autonomy and the average consumption in watts — two ways to read the
-      // same duty-cycled draw (the planning figure).
+      // Both readouts are on the slow (τ ≈ 1 h) average, right-aligned to the
+      // screen edge. Alternate every 3 s between the autonomy and the average
+      // consumption in watts — two ways to read the same duty-cycled draw (the
+      // planning figure). The 'd'/':'/'W' suffix identifies each on its own.
       if ((millis() / 3000) % 2) {
         int w = (int)(iSlow * voltage);
-        display.setCursor(SCREEN_W - (2 + numLen(w)) * 6, ty);
-        display.print('~');
+        display.setCursor(SCREEN_W - (1 + numLen(w)) * 6, ty);
         display.print(w);
         display.print('W');
       } else {
         float hSlow = (coulombCount / 3600.0) / iSlow;
-        display.setCursor(SCREEN_W - (1 + durationLen(hSlow)) * 6, ty);
-        display.print('~');
+        display.setCursor(SCREEN_W - durationLen(hSlow) * 6, ty);
         printDuration(hSlow);
       }
     }
