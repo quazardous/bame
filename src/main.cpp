@@ -155,7 +155,10 @@ static void eepromSave() {
   r.seq               = eeSeq;
   r.coulomb           = bame.coulomb_count;
   r.capacity          = bame.capacity_ah;
-  r.learned           = bame.capacity_learned ? 1 : 0;
+  // bit0 = capacity_learned, bit1 = soc_uncertain (packed to keep the record
+  // size — and thus the CRC layout — unchanged so old slots stay valid).
+  r.learned           = (bame.capacity_learned ? 0x01 : 0)
+                      | (bame.soc_uncertain   ? 0x02 : 0);
   r.anchor_kind       = bame.last_anchor_kind;
   r.coulomb_at_anchor = bame.coulomb_at_last_anchor;
   r.soc_at_anchor     = bame.soc_at_last_anchor;
@@ -178,9 +181,14 @@ static void eepromLoad() {
   if (!found) { eeSlot = -1; eeSeq = 0; return; }   // blank/garbage EEPROM → defaults
   eeSeq = best.seq;
 
+  // A reboot doesn't add SOC uncertainty here: BaMe is powered by the battery,
+  // so while it's off the pack can't change unmeasured (off = empty or
+  // disconnected; a recharge powers BaMe back on and it measures the charge).
+  // So carry the saved certainty over instead of crying '?' on every reboot.
+  bame.soc_uncertain = (best.learned & 0x02) != 0;
   if (best.capacity >= CAPACITY_MIN && best.capacity <= CAPACITY_MAX) {
     bame.capacity_ah      = best.capacity;
-    bame.capacity_learned = best.learned != 0;
+    bame.capacity_learned = (best.learned & 0x01) != 0;
   }
   // Guard the counter against a CRC-colliding garbage slot (NaN fails all
   // comparisons, so the core's first-tick clamp wouldn't catch it).
@@ -313,6 +321,7 @@ void setup() {
   eepromLoad();
   batteryCapacityAh = bame.capacity_ah;
   capacityLearned   = bame.capacity_learned;
+  socUncertain      = bame.soc_uncertain;   // restored, not forced true at boot
   coulombCount      = bame.coulomb_count;
   lastSavedCoulomb  = bame.coulomb_count;
   lastSavedAnchor   = bame.last_anchor_kind;

@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.19
+
+### No more spurious '?' after a reboot
+
+`soc_uncertain` was set true by `bame_init` and never restored, so the `?`
+(SOC-drifted-from-reality flag) lit after every reboot and reflash — crying wolf
+and diluting its meaning. But since v2.5 the coulomb counter is restored from
+EEPROM with a CRC, and in this self-powered topology a reboot can't add
+uncertainty: while BaMe is off the pack can't change unmeasured (off means empty
+or disconnected; a recharge powers BaMe back on and it measures the charge). So
+`soc_uncertain` is now persisted (packed into a spare bit of the record's
+`learned` byte, keeping the size and CRC layout unchanged so existing slots stay
+valid) and carried over on boot. The `?` now means what it says — it shows on a
+genuinely uncertain state (fresh unit before its first full, or a LOAD-mode
+invisible charge) and clears at the next full.
+
+
 ## v2.18
 
 ### Long-term autonomy as a single unit
