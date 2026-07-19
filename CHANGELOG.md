@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.22
+
+### A decimal on the long-term autonomy's days and hours
+
+`6d` / `18h` were too coarse in use. The slow (bottom-left) autonomy now shows
+one decimal for days and hours — `6.9d`, `18.3h` — while minutes and seconds
+stay whole (`45m`, `30s`).
+
+
 ## v2.21
 
 ### Small loads wake the screen again

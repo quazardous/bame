@@ -23,7 +23,7 @@ YELLOW_H = 16
 BLUE_Y = 16
 
 # Firmware version (match BAME_VERSION in src/bame_state.h)
-BAME_VERSION = "2.21"
+BAME_VERSION = "2.22"
 
 # Colors for PNG
 COL_BG = (0, 0, 0)
@@ -248,9 +248,9 @@ def _draw_main(d, voltage, current, soc, cap_ah, cells=4,
 
     draw_gauge(d, soc)
 
-    def fmt_short(hours):   # slow autonomy: single most-significant unit d/h/m/s
-        if hours >= 24:      return f"{int(hours/24)}d"
-        if hours >= 1:       return f"{int(hours)}h"
+    def fmt_short(hours):   # slow autonomy: 1 decimal for d/h, whole m/s
+        if hours >= 24:      return f"{hours/24:.1f}d"
+        if hours >= 1:       return f"{hours:.1f}h"
         if hours * 60 >= 1:  return f"{int(hours*60)}m"
         return f"{int(hours*3600)}s"
 

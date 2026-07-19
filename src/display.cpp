@@ -27,15 +27,15 @@ static uint8_t numLen(long v) {           // digits of a non-negative int
   return n;
 }
 
-// Compact single-unit form for the long-term (slow) autonomy: just the most
-// significant whole unit with its suffix — "7d", "18h", "45m", "30s". A rough
-// planning figure doesn't need HH:MM precision. Returns the value and sets the
-// suffix; a separate print keeps the width calc (for right-alignment) in sync.
-static long shortValue(float hours, char* suffix) {
-  if (hours >= 24.0f)        { *suffix = 'd'; return (long)(hours / 24.0f); }
-  if (hours >= 1.0f)         { *suffix = 'h'; return (long)hours; }
-  if (hours * 60.0f >= 1.0f) { *suffix = 'm'; return (long)(hours * 60.0f); }
-  *suffix = 's';             return (long)(hours * 3600.0f);
+// Compact single-unit form for the long-term (slow) autonomy at the cursor:
+// the most significant unit with its suffix. Days and hours get one decimal
+// ("6.9d", "18.3h") since a whole day/hour is coarse; minutes and seconds stay
+// whole ("45m", "30s"). Left-aligned in "5W 6.9d", so no width calc needed.
+static void printShort(float hours) {
+  if (hours >= 24.0f)             { display.print(hours / 24.0f, 1); display.print('d'); }
+  else if (hours >= 1.0f)         { display.print(hours, 1);         display.print('h'); }
+  else if (hours * 60.0f >= 1.0f) { display.print((int)(hours * 60.0f));   display.print('m'); }
+  else                            { display.print((int)(hours * 3600.0f)); display.print('s'); }
 }
 
 static void printDuration(float hours) {
@@ -159,10 +159,7 @@ void updateDisplay() {
   if (iSlow > SLOW_AUTONOMY_MIN) {
     display.print((int)(iSlow * voltage));
     display.print(F("W "));
-    char suf;
-    long v = shortValue((coulombCount / 3600.0) / iSlow, &suf);
-    display.print(v);
-    display.print(suf);
+    printShort((coulombCount / 3600.0) / iSlow);
   } else {
     display.print((int)batteryCapacityAh);
     display.print(F("Ah"));
